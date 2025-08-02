@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -758,14 +759,6 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	spa->spa_alloc_count = MAX(MIN(spa_num_allocators,
 	    boot_ncpus / MAX(spa_cpus_per_allocator, 1)), 1);
 
-	spa->spa_allocs = kmem_zalloc(spa->spa_alloc_count *
-	    sizeof (spa_alloc_t), KM_SLEEP);
-	for (int i = 0; i < spa->spa_alloc_count; i++) {
-		mutex_init(&spa->spa_allocs[i].spaa_lock, NULL, MUTEX_DEFAULT,
-		    NULL);
-		avl_create(&spa->spa_allocs[i].spaa_tree, zio_bookmark_compare,
-		    sizeof (zio_t), offsetof(zio_t, io_queue_node.a));
-	}
 	if (spa->spa_alloc_count > 1) {
 		spa->spa_allocs_use = kmem_zalloc(offsetof(spa_allocs_use_t,
 		    sau_inuse[spa->spa_alloc_count]), KM_SLEEP);
@@ -861,12 +854,6 @@ spa_remove(spa_t *spa)
 		kmem_free(dp, sizeof (spa_config_dirent_t));
 	}
 
-	for (int i = 0; i < spa->spa_alloc_count; i++) {
-		avl_destroy(&spa->spa_allocs[i].spaa_tree);
-		mutex_destroy(&spa->spa_allocs[i].spaa_lock);
-	}
-	kmem_free(spa->spa_allocs, spa->spa_alloc_count *
-	    sizeof (spa_alloc_t));
 	if (spa->spa_alloc_count > 1) {
 		mutex_destroy(&spa->spa_allocs_use->sau_lock);
 		kmem_free(spa->spa_allocs_use, offsetof(spa_allocs_use_t,
@@ -1317,11 +1304,11 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	/*
 	 * Verify the metaslab classes.
 	 */
-	ASSERT(metaslab_class_validate(spa_normal_class(spa)) == 0);
-	ASSERT(metaslab_class_validate(spa_log_class(spa)) == 0);
-	ASSERT(metaslab_class_validate(spa_embedded_log_class(spa)) == 0);
-	ASSERT(metaslab_class_validate(spa_special_class(spa)) == 0);
-	ASSERT(metaslab_class_validate(spa_dedup_class(spa)) == 0);
+	metaslab_class_validate(spa_normal_class(spa));
+	metaslab_class_validate(spa_log_class(spa));
+	metaslab_class_validate(spa_embedded_log_class(spa));
+	metaslab_class_validate(spa_special_class(spa));
+	metaslab_class_validate(spa_dedup_class(spa));
 
 	spa_config_exit(spa, SCL_ALL, spa);
 
@@ -2022,8 +2009,7 @@ spa_dedup_class(spa_t *spa)
 boolean_t
 spa_special_has_ddt(spa_t *spa)
 {
-	return (zfs_ddt_data_is_special &&
-	    spa->spa_special_class->mc_groups != 0);
+	return (zfs_ddt_data_is_special && spa_has_special(spa));
 }
 
 /*
@@ -2032,6 +2018,9 @@ spa_special_has_ddt(spa_t *spa)
 metaslab_class_t *
 spa_preferred_class(spa_t *spa, const zio_t *zio)
 {
+	metaslab_class_t *mc = zio->io_metaslab_class;
+	boolean_t tried_dedup = (mc == spa_dedup_class(spa));
+	boolean_t tried_special = (mc == spa_special_class(spa));
 	const zio_prop_t *zp = &zio->io_prop;
 
 	/*
@@ -2049,12 +2038,10 @@ spa_preferred_class(spa_t *spa, const zio_t *zio)
 	 */
 	ASSERT(objtype != DMU_OT_INTENT_LOG);
 
-	boolean_t has_special_class = spa->spa_special_class->mc_groups != 0;
-
 	if (DMU_OT_IS_DDT(objtype)) {
-		if (spa->spa_dedup_class->mc_groups != 0)
+		if (spa_has_dedup(spa) && !tried_dedup && !tried_special)
 			return (spa_dedup_class(spa));
-		else if (has_special_class && zfs_ddt_data_is_special)
+		else if (spa_special_has_ddt(spa) && !tried_special)
 			return (spa_special_class(spa));
 		else
 			return (spa_normal_class(spa));
@@ -2063,26 +2050,28 @@ spa_preferred_class(spa_t *spa, const zio_t *zio)
 	/* Indirect blocks for user data can land in special if allowed */
 	if (zp->zp_level > 0 &&
 	    (DMU_OT_IS_FILE(objtype) || objtype == DMU_OT_ZVOL)) {
-		if (has_special_class && zfs_user_indirect_is_special)
+		if (zfs_user_indirect_is_special && spa_has_special(spa) &&
+		    !tried_special)
 			return (spa_special_class(spa));
 		else
 			return (spa_normal_class(spa));
 	}
 
 	if (DMU_OT_IS_METADATA(objtype) || zp->zp_level > 0) {
-		if (has_special_class)
+		if (spa_has_special(spa) && !tried_special)
 			return (spa_special_class(spa));
 		else
 			return (spa_normal_class(spa));
 	}
 
 	/*
-	 * Allow small file blocks in special class in some cases (like
-	 * for the dRAID vdev feature). But always leave a reserve of
+	 * Allow small file or zvol blocks in special class if opted in by
+	 * the special_smallblk property. However, always leave a reserve of
 	 * zfs_special_class_metadata_reserve_pct exclusively for metadata.
 	 */
-	if (DMU_OT_IS_FILE(objtype) &&
-	    has_special_class && zio->io_size <= zp->zp_zpl_smallblk) {
+	if ((DMU_OT_IS_FILE(objtype) || objtype == DMU_OT_ZVOL) &&
+	    spa_has_special(spa) && !tried_special &&
+	    zio->io_size <= zp->zp_zpl_smallblk) {
 		metaslab_class_t *special = spa_special_class(spa);
 		uint64_t alloc = metaslab_class_get_alloc(special);
 		uint64_t space = metaslab_class_get_space(special);
@@ -2549,8 +2538,9 @@ spa_name_compare(const void *a1, const void *a2)
 }
 
 void
-spa_boot_init(void)
+spa_boot_init(void *unused)
 {
+	(void) unused;
 	spa_config_load();
 }
 
@@ -2652,6 +2642,12 @@ spa_fini(void)
 	mutex_destroy(&spa_l2cache_lock);
 }
 
+boolean_t
+spa_has_dedup(spa_t *spa)
+{
+	return (spa->spa_dedup_class->mc_groups != 0);
+}
+
 /*
  * Return whether this pool has a dedicated slog device. No locking needed.
  * It's not a problem if the wrong answer is returned as it's only for
@@ -2661,6 +2657,12 @@ boolean_t
 spa_has_slogs(spa_t *spa)
 {
 	return (spa->spa_log_class->mc_groups != 0);
+}
+
+boolean_t
+spa_has_special(spa_t *spa)
+{
+	return (spa->spa_special_class->mc_groups != 0);
 }
 
 spa_log_state_t

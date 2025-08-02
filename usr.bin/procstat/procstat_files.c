@@ -75,6 +75,8 @@ protocol_to_string(int domain, int type, int protocol)
 			return ("UDS");
 		case SOCK_DGRAM:
 			return ("UDD");
+		case SOCK_SEQPACKET:
+			return ("UDQ");
 		default:
 			return ("UD?");
 		}
@@ -223,6 +225,10 @@ static struct cap_desc {
 	 */
 	{ CAP_BINDAT,		"ba" },
 	{ CAP_CONNECTAT,	"ca" },
+
+	/* Inotify descriptor rights. */
+	{ CAP_INOTIFY_ADD,	"ina" },
+	{ CAP_INOTIFY_RM,	"inr" },
 
 	/* Aliases and defines that combine multiple rights. */
 	{ CAP_PREAD,		"prd" },
@@ -412,6 +418,11 @@ procstat_files(struct procstat *procstat, struct kinfo_proc *kipp)
 		case PS_FST_TYPE_EVENTFD:
 			str = "E";
 			xo_emit("{eq:fd_type/eventfd}");
+			break;
+
+		case PS_FST_TYPE_INOTIFY:
+			str = "i";
+			xo_emit("{eq:fd_type/inotify}");
 			break;
 
 		case PS_FST_TYPE_NONE:

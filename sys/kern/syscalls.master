@@ -107,9 +107,11 @@
 ;	timet_	Object contains a time_t and varies between i386 and other
 ;		ABIs.
 
-; #include's, #defines's, etc. may be included, and are copied to the output
-; files. However, #ifdef, etc will be copied, but any lines that don't start
-; with # will not. Caveat Emptor.
+; #include's, #defines's, etc. may be included, and are copied to a
+; limited set of output files.  Before the first syscalls, #include lines will
+; be copied and %%ABI_HEADERS%% expanded.  Between system call entries,
+; all lines beginning with # will be copied.  Caveat Emptor.
+; WARNING: this functionality is deprecated.
 
 #include <sys/param.h>
 #include <sys/sysent.h>
@@ -1221,7 +1223,7 @@
 	}
 202	AUE_SYSCTL	STD|CAPENABLED {
 		int __sysctl(
-		    _In_reads_(namelen) int *name,
+		    _In_reads_(namelen) const int *name,
 		    u_int namelen,
 		    _Out_writes_bytes_opt_(*oldlenp) void *old,
 		    _Inout_opt_ size_t *oldlenp,
@@ -3345,6 +3347,27 @@
 		    u_int flags,
 		    _In_reads_bytes_(size) _Contains_ptr_ const struct setcred *wcred,
 		    size_t size
+		);
+	}
+592	AUE_NULL	STD|CAPENABLED {
+		int exterrctl(
+		    u_int op,
+		    u_int flags,
+		    _In_reads_bytes_(4) void *ptr
+		);
+	}
+593	AUE_INOTIFY	STD|CAPENABLED {
+		int inotify_add_watch_at(
+		    int fd,
+		    int dfd,
+		    _In_z_ const char *path,
+		    uint32_t mask
+		);
+	}
+594	AUE_INOTIFY	STD|CAPENABLED {
+		int inotify_rm_watch(
+		    int fd,
+		    int wd
 		);
 	}
 

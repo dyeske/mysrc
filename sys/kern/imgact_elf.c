@@ -64,6 +64,7 @@
 #include <sys/syscall.h>
 #include <sys/sysctl.h>
 #include <sys/sysent.h>
+#include <sys/ucoredump.h>
 #include <sys/vnode.h>
 #include <sys/syslog.h>
 #include <sys/eventhandler.h>
@@ -1487,6 +1488,10 @@ __elfN(freebsd_copyout_auxargs)(struct image_params *imgp, uintptr_t base)
 		AUXARGS_ENTRY(pos, AT_HWCAP, *imgp->sysent->sv_hwcap);
 	if (imgp->sysent->sv_hwcap2 != NULL)
 		AUXARGS_ENTRY(pos, AT_HWCAP2, *imgp->sysent->sv_hwcap2);
+	if (imgp->sysent->sv_hwcap3 != NULL)
+		AUXARGS_ENTRY(pos, AT_HWCAP3, *imgp->sysent->sv_hwcap3);
+	if (imgp->sysent->sv_hwcap4 != NULL)
+		AUXARGS_ENTRY(pos, AT_HWCAP4, *imgp->sysent->sv_hwcap4);
 	bsdflags = 0;
 	bsdflags |= __elfN(sigfastblock) ? ELF_BSDF_SIGFASTBLK : 0;
 	oc = atomic_load_int(&vm_overcommit);
@@ -1558,9 +1563,6 @@ struct note_info {
 
 TAILQ_HEAD(note_info_list, note_info);
 
-extern int compress_user_cores;
-extern int compress_user_cores_level;
-
 static void cb_put_phdr(vm_map_entry_t, void *);
 static void cb_size_segment(vm_map_entry_t, void *);
 static void each_dumpable_segment(struct thread *, segment_callback, void *,
@@ -1574,6 +1576,7 @@ static void __elfN(note_threadmd)(void *, struct sbuf *, size_t *);
 static void __elfN(note_procstat_auxv)(void *, struct sbuf *, size_t *);
 static void __elfN(note_procstat_proc)(void *, struct sbuf *, size_t *);
 static void __elfN(note_procstat_psstrings)(void *, struct sbuf *, size_t *);
+static void __elfN(note_procstat_kqueues)(void *, struct sbuf *, size_t *);
 static void note_procstat_files(void *, struct sbuf *, size_t *);
 static void note_procstat_groups(void *, struct sbuf *, size_t *);
 static void note_procstat_osrel(void *, struct sbuf *, size_t *);
@@ -1590,7 +1593,7 @@ core_compressed_write(void *base, size_t len, off_t offset, void *arg)
 }
 
 int
-__elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
+__elfN(coredump)(struct thread *td, struct coredump_writer *cdw, off_t limit, int flags)
 {
 	struct ucred *cred = td->td_ucred;
 	int compm, error = 0;
@@ -1620,9 +1623,8 @@ __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 	/* Set up core dump parameters. */
 	params.offset = 0;
 	params.active_cred = cred;
-	params.file_cred = NOCRED;
 	params.td = td;
-	params.vp = vp;
+	params.cdw = cdw;
 	params.comp = NULL;
 
 #ifdef RACCT
@@ -1656,6 +1658,12 @@ __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 		}
 		tmpbuf = malloc(CORE_BUF_SIZE, M_TEMP, M_WAITOK | M_ZERO);
         }
+
+	if (cdw->init_fn != NULL) {
+		error = (*cdw->init_fn)(cdw, &params);
+		if (error != 0)
+			goto done;
+	}
 
 	/*
 	 * Allocate memory for building the header, fill it up,
@@ -1899,6 +1907,8 @@ __elfN(prepare_notes)(struct thread *td, struct note_info_list *list,
 	    __elfN(note_procstat_psstrings), p);
 	size += __elfN(register_note)(td, list, NT_PROCSTAT_AUXV,
 	    __elfN(note_procstat_auxv), p);
+	size += __elfN(register_note)(td, list, NT_PROCSTAT_KQUEUES,
+	    __elfN(note_procstat_kqueues), p);
 
 	*sizep = size;
 }
@@ -2716,6 +2726,54 @@ __elfN(note_procstat_auxv)(void *arg, struct sbuf *sb, size_t *sizep)
 		PHOLD(p);
 		proc_getauxv(curthread, p, sb);
 		PRELE(p);
+	}
+}
+
+static void
+__elfN(note_procstat_kqueues)(void *arg, struct sbuf *sb, size_t *sizep)
+{
+	struct proc *p;
+	size_t size, sect_sz, i;
+	ssize_t start_len, sect_len;
+	int structsize;
+	bool compat32;
+
+#if defined(COMPAT_FREEBSD32) && __ELF_WORD_SIZE == 32
+	compat32 = true;
+	structsize = sizeof(struct kinfo_knote32);
+#else
+	compat32 = false;
+	structsize = sizeof(struct kinfo_knote);
+#endif
+	p = arg;
+	if (sb == NULL) {
+		size = 0;
+		sb = sbuf_new(NULL, NULL, 128, SBUF_FIXEDLEN);
+		sbuf_set_drain(sb, sbuf_count_drain, &size);
+		sbuf_bcat(sb, &structsize, sizeof(structsize));
+		kern_proc_kqueues_out(p, sb, -1, compat32);
+		sbuf_finish(sb);
+		sbuf_delete(sb);
+		*sizep = size;
+	} else {
+		sbuf_start_section(sb, &start_len);
+
+		sbuf_bcat(sb, &structsize, sizeof(structsize));
+		kern_proc_kqueues_out(p, sb, *sizep - sizeof(structsize),
+		    compat32);
+
+		sect_len = sbuf_end_section(sb, start_len, 0, 0);
+		if (sect_len < 0)
+			return;
+		sect_sz = sect_len;
+
+		KASSERT(sect_sz <= *sizep,
+		    ("kern_proc_kqueue_out did not respect maxlen; "
+		     "requested %zu, got %zu", *sizep - sizeof(structsize),
+		     sect_sz - sizeof(structsize)));
+
+		for (i = 0; i < *sizep - sect_sz && sb->s_error == 0; i++)
+			sbuf_putc(sb, 0);
 	}
 }
 

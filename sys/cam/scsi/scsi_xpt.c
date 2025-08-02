@@ -40,6 +40,7 @@
 #include <sys/fcntl.h>
 #include <sys/md5.h>
 #include <sys/sbuf.h>
+#include <sys/stdarg.h>
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -59,7 +60,6 @@
 #include <cam/scsi/scsi_all.h>
 #include <cam/scsi/scsi_message.h>
 #include <cam/scsi/scsi_pass.h>
-#include <machine/stdarg.h>	/* for xpt_print below */
 
 struct scsi_quirk_entry {
 	struct scsi_inquiry_pattern inq_pat;
@@ -618,6 +618,7 @@ SCSI_XPT_XPORT(usb, USB);
 SCSI_XPT_XPORT(iscsi, ISCSI);
 SCSI_XPT_XPORT(srp, SRP);
 SCSI_XPT_XPORT(ppb, PPB);
+SCSI_XPT_XPORT(ufshci, UFSHCI);
 
 #undef SCSI_XPORT_XPORT
 
@@ -646,16 +647,14 @@ proberegister(struct cam_periph *periph, void *arg)
 
 	request_ccb = (union ccb *)arg;
 	if (request_ccb == NULL) {
-		printf("proberegister: no probe CCB, "
-		       "can't register device\n");
+		printf("proberegister: no probe CCB, can't register device\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 
 	softc = (probe_softc *)malloc(sizeof(*softc), M_CAMXPT, M_NOWAIT);
 
 	if (softc == NULL) {
-		printf("proberegister: Unable to probe new device. "
-		       "Unable to allocate softc\n");
+		printf("proberegister: Unable to probe new device. Unable to allocate softc\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 	TAILQ_INIT(&softc->request_ccbs);
@@ -864,8 +863,8 @@ again:
 					/*timeout*/60000);
 			break;
 		}
-		xpt_print(periph->path, "Unable to mode sense control page - "
-		    "malloc failure\n");
+		xpt_print(periph->path,
+		    "Unable to mode sense control page - malloc failure\n");
 		PROBE_SET_ACTION(softc, PROBE_SUPPORTED_VPD_LIST);
 	}
 	/* FALLTHROUGH */
@@ -1000,8 +999,8 @@ done:
 		inquiry_len = roundup2(SID_ADDITIONAL_LENGTH(inq_buf), 2);
 		inq_buf = malloc(inquiry_len, M_CAMXPT, M_NOWAIT);
 		if (inq_buf == NULL) {
-			xpt_print(periph->path, "malloc failure- skipping Basic"
-			    "Domain Validation\n");
+			xpt_print(periph->path,
+			    "malloc failure- skipping Basic Domain Validation\n");
 			PROBE_SET_ACTION(softc, PROBE_DV_EXIT);
 			scsi_test_unit_ready(csio,
 					     /*retries*/4,
@@ -1916,6 +1915,15 @@ typedef struct {
 	int	lunindex[0];
 } scsi_scan_bus_info;
 
+static void
+free_scan_info(scsi_scan_bus_info *scan_info)
+{
+	KASSERT(scan_info->cpi != NULL,
+	    ("scan_info (%p) missing its ccb_pathinq CCB\n", scan_info));
+	xpt_free_ccb((union ccb *)scan_info->cpi);
+	free(scan_info, M_CAMXPT);
+}
+
 /*
  * To start a scan, request_ccb is an XPT_SCAN_BUS ccb.
  * As the scan progresses, scsi_scan_bus is used as the
@@ -1946,10 +1954,7 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 			xpt_done(request_ccb);
 			return;
 		}
-		xpt_setup_ccb(&work_ccb->ccb_h, request_ccb->ccb_h.path,
-			      request_ccb->ccb_h.pinfo.priority);
-		work_ccb->ccb_h.func_code = XPT_PATH_INQ;
-		xpt_action(work_ccb);
+		xpt_path_inq(&work_ccb->cpi, request_ccb->ccb_h.path);
 		if (work_ccb->ccb_h.status != CAM_REQ_CMP) {
 			request_ccb->ccb_h.status = work_ccb->ccb_h.status;
 			xpt_free_ccb(work_ccb);
@@ -2035,19 +2040,17 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 						 request_ccb->ccb_h.path_id,
 						 i, 0);
 			if (status != CAM_REQ_CMP) {
-				printf("scsi_scan_bus: xpt_create_path failed"
-				       " with status %#x, bus scan halted\n",
-				       status);
-				free(scan_info, M_CAMXPT);
+				printf(
+		"scsi_scan_bus: xpt_create_path failed with status %#x, bus scan halted\n",
+				    status);
+				free_scan_info(scan_info);
 				request_ccb->ccb_h.status = status;
-				xpt_free_ccb(work_ccb);
 				xpt_done(request_ccb);
 				break;
 			}
 			work_ccb = xpt_alloc_ccb_nowait();
 			if (work_ccb == NULL) {
-				xpt_free_ccb((union ccb *)scan_info->cpi);
-				free(scan_info, M_CAMXPT);
+				free_scan_info(scan_info);
 				xpt_free_path(path);
 				request_ccb->ccb_h.status = CAM_RESRC_UNAVAIL;
 				xpt_done(request_ccb);
@@ -2180,16 +2183,16 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 		 * Check to see if we scan any further luns.
 		 */
 		if (next_target) {
-			int done;
+			bool done;
 
 			/*
 			 * Free the current request path- we're done with it.
 			 */
 			xpt_free_path(oldpath);
  hop_again:
-			done = 0;
+			done = false;
 			if (scan_info->request_ccb->ccb_h.func_code == XPT_SCAN_TGT) {
-				done = 1;
+				done = true;
 			} else if (scan_info->cpi->hba_misc & PIM_SEQSCAN) {
 				scan_info->counter++;
 				if (scan_info->counter ==
@@ -2198,23 +2201,22 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 				}
 				if (scan_info->counter >=
 				    scan_info->cpi->max_target+1) {
-					done = 1;
+					done = true;
 				}
 			} else {
 				scan_info->counter--;
 				if (scan_info->counter == 0) {
-					done = 1;
+					done = true;
 				}
 			}
 			if (done) {
 				mtx_unlock(mtx);
 				xpt_free_ccb(request_ccb);
-				xpt_free_ccb((union ccb *)scan_info->cpi);
 				request_ccb = scan_info->request_ccb;
 				CAM_DEBUG(request_ccb->ccb_h.path,
 				    CAM_DEBUG_TRACE,
 				   ("SCAN done for %p\n", scan_info));
-				free(scan_info, M_CAMXPT);
+				free_scan_info(scan_info);
 				request_ccb->ccb_h.status = CAM_REQ_CMP;
 				xpt_done(request_ccb);
 				break;
@@ -2230,13 +2232,12 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 			    scan_info->counter, 0);
 			if (status != CAM_REQ_CMP) {
 				mtx_unlock(mtx);
-				printf("scsi_scan_bus: xpt_create_path failed"
-				    " with status %#x, bus scan halted\n",
+				printf(
+		"scsi_scan_bus: xpt_create_path failed with status %#x, bus scan halted\n",
 			       	    status);
 				xpt_free_ccb(request_ccb);
-				xpt_free_ccb((union ccb *)scan_info->cpi);
 				request_ccb = scan_info->request_ccb;
-				free(scan_info, M_CAMXPT);
+				free_scan_info(scan_info);
 				request_ccb->ccb_h.status = status;
 				xpt_done(request_ccb);
 				break;
@@ -2260,9 +2261,9 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 			 */
 			xpt_free_path(oldpath);
 			if (status != CAM_REQ_CMP) {
-				printf("scsi_scan_bus: xpt_create_path failed "
-				       "with status %#x, halting LUN scan\n",
-			 	       status);
+				printf(
+		"scsi_scan_bus: xpt_create_path failed with status %#x, halting LUN scan\n",
+				    status);
 				goto hop_again;
 			}
 			xpt_setup_ccb(&request_ccb->ccb_h, path,
@@ -2295,10 +2296,7 @@ scsi_scan_lun(struct cam_periph *periph, struct cam_path *path,
 
 	CAM_DEBUG(path, CAM_DEBUG_TRACE, ("scsi_scan_lun\n"));
 
-	memset(&cpi, 0, sizeof(cpi));
-	xpt_setup_ccb(&cpi.ccb_h, path, CAM_PRIORITY_NONE);
-	cpi.ccb_h.func_code = XPT_PATH_INQ;
-	xpt_action((union ccb *)&cpi);
+	xpt_path_inq(&cpi, path);
 
 	if (cpi.ccb_h.status != CAM_REQ_CMP) {
 		if (request_ccb != NULL) {
@@ -2323,8 +2321,8 @@ scsi_scan_lun(struct cam_periph *periph, struct cam_path *path,
 	if (request_ccb == NULL) {
 		request_ccb = xpt_alloc_ccb_nowait();
 		if (request_ccb == NULL) {
-			xpt_print(path, "scsi_scan_lun: can't allocate CCB, "
-			    "can't continue\n");
+			xpt_print(path,
+			    "scsi_scan_lun: can't allocate CCB, can't continue\n");
 			return;
 		}
 		status = xpt_create_path(&new_path, NULL,
@@ -2332,8 +2330,8 @@ scsi_scan_lun(struct cam_periph *periph, struct cam_path *path,
 					  path->target->target_id,
 					  path->device->lun_id);
 		if (status != CAM_REQ_CMP) {
-			xpt_print(path, "scsi_scan_lun: can't create path, "
-			    "can't continue\n");
+			xpt_print(path,
+			    "scsi_scan_lun: can't create path, can't continue\n");
 			xpt_free_ccb(request_ccb);
 			return;
 		}
@@ -2366,8 +2364,8 @@ scsi_scan_lun(struct cam_periph *periph, struct cam_path *path,
 					  request_ccb);
 
 		if (status != CAM_REQ_CMP) {
-			xpt_print(path, "scsi_scan_lun: cam_alloc_periph "
-			    "returned an error, can't continue probe\n");
+			xpt_print(path,
+	    "scsi_scan_lun: cam_alloc_periph returned an error, can't continue probe\n");
 			request_ccb->ccb_h.status = status;
 			xpt_done(request_ccb);
 		}
@@ -2422,10 +2420,7 @@ scsi_devise_transport(struct cam_path *path)
 	struct scsi_inquiry_data *inq_buf;
 
 	/* Get transport information from the SIM */
-	memset(&cpi, 0, sizeof(cpi));
-	xpt_setup_ccb(&cpi.ccb_h, path, CAM_PRIORITY_NONE);
-	cpi.ccb_h.func_code = XPT_PATH_INQ;
-	xpt_action((union ccb *)&cpi);
+	xpt_path_inq(&cpi, path);
 
 	inq_buf = NULL;
 	if ((path->device->flags & CAM_DEV_INQUIRY_DATA_VALID) != 0)
@@ -2619,8 +2614,7 @@ scsi_action(union ccb *start_ccb)
 
 	if (start_ccb->ccb_h.func_code != XPT_SCSI_IO) {
 		KASSERT((start_ccb->ccb_h.alloc_flags & CAM_CCB_FROM_UMA) == 0,
-		    ("%s: ccb %p, func_code %#x should not be allocated "
-		    "from UMA zone\n",
+		    ("%s: ccb %p, func_code %#x should not be allocated from UMA zone\n",
 		    __func__, start_ccb, start_ccb->ccb_h.func_code));
 	}
 
@@ -2687,8 +2681,9 @@ scsi_set_transfer_settings(struct ccb_trans_settings *cts, struct cam_path *path
 
 	if (cts->protocol_version > device->protocol_version) {
 		if (bootverbose) {
-			xpt_print(path, "Down reving Protocol "
-			    "Version from %d to %d?\n", cts->protocol_version,
+			xpt_print(path,
+			    "Down reving Protocol Version from %d to %d?\n",
+			    cts->protocol_version,
 			    device->protocol_version);
 		}
 		cts->protocol_version = device->protocol_version;
@@ -2712,8 +2707,9 @@ scsi_set_transfer_settings(struct ccb_trans_settings *cts, struct cam_path *path
 
 	if (cts->transport_version > device->transport_version) {
 		if (bootverbose) {
-			xpt_print(path, "Down reving Transport "
-			    "Version from %d to %d?\n", cts->transport_version,
+			xpt_print(path,
+			    "Down reving Transport Version from %d to %d?\n",
+			    cts->transport_version,
 			    device->transport_version);
 		}
 		cts->transport_version = device->transport_version;
@@ -2732,10 +2728,7 @@ scsi_set_transfer_settings(struct ccb_trans_settings *cts, struct cam_path *path
 
 	inq_data = &device->inq_data;
 	scsi = &cts->proto_specific.scsi;
-	memset(&cpi, 0, sizeof(cpi));
-	xpt_setup_ccb(&cpi.ccb_h, path, CAM_PRIORITY_NONE);
-	cpi.ccb_h.func_code = XPT_PATH_INQ;
-	xpt_action((union ccb *)&cpi);
+	xpt_path_inq(&cpi, path);
 
 	/* SCSI specific sanity checking */
 	if ((cpi.hba_inquiry & PI_TAG_ABLE) == 0
@@ -3046,10 +3039,7 @@ _scsi_announce_periph(struct cam_periph *periph, u_int *speed, u_int *freq, stru
 		return;
 
 	/* Ask the SIM for its base transfer speed */
-	memset(&cpi, 0, sizeof(cpi));
-	xpt_setup_ccb(&cpi.ccb_h, path, CAM_PRIORITY_NORMAL);
-	cpi.ccb_h.func_code = XPT_PATH_INQ;
-	xpt_action((union ccb *)&cpi);
+	xpt_path_inq(&cpi, path);
 
 	/* Report connection speed */
 	*speed = cpi.base_transfer_speed;

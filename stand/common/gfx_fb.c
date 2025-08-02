@@ -161,6 +161,14 @@ static const int vga_to_cons_colors[NCOLORS] = {
 	8,  9, 10, 11,  12, 13, 14, 15
 };
 
+/*
+ * It is reported very slow console draw in some systems.
+ * in order to exclude buggy gop->Blt(), we want option
+ * to use direct draw to framebuffer and avoid gop->Blt.
+ * Can be toggled with "gop" command.
+ */
+bool ignore_gop_blt = false;
+
 struct text_pixel *screen_buffer;
 #if defined(EFI)
 static EFI_GRAPHICS_OUTPUT_BLT_PIXEL *GlyphBuffer;
@@ -795,7 +803,7 @@ gfxfb_blt(void *BltBuffer, GFXFB_BLT_OPERATION BltOperation,
 	 * done as they are provided by protocols that disappear when exit
 	 * boot services.
 	 */
-	if (gop != NULL && boot_services_active) {
+	if (!ignore_gop_blt && gop != NULL && boot_services_active) {
 		tpl = BS->RaiseTPL(TPL_NOTIFY);
 		switch (BltOperation) {
 		case GfxFbBltVideoFill:
@@ -993,6 +1001,8 @@ gfx_fb_fill(void *arg, const teken_rect_t *r, teken_char_t c,
 	teken_pos_t p;
 	struct text_pixel *row;
 
+	TSENTER();
+
 	/* remove the cursor */
 	if (state->tg_cursor_visible)
 		gfx_fb_cursor_draw(state, &state->tg_cursor, false);
@@ -1018,6 +1028,8 @@ gfx_fb_fill(void *arg, const teken_rect_t *r, teken_char_t c,
 		c = teken_get_cursor(&state->tg_teken);
 		gfx_fb_cursor_draw(state, c, true);
 	}
+
+	TSEXIT();
 }
 
 static void
@@ -2042,7 +2054,8 @@ gfx_get_ppi(void)
  * not smaller than calculated size value.
  */
 static vt_font_bitmap_data_t *
-gfx_get_font(void)
+gfx_get_font(teken_unit_t rows, teken_unit_t cols, teken_unit_t height,
+    teken_unit_t width)
 {
 	unsigned ppi, size;
 	vt_font_bitmap_data_t *font = NULL;
@@ -2065,6 +2078,14 @@ gfx_get_font(void)
 	size = roundup(size * 2, 10) / 10;
 
 	STAILQ_FOREACH(fl, &fonts, font_next) {
+		/*
+		 * Skip too large fonts.
+		 */
+		font = fl->font_data;
+		if (height / font->vfbd_height < rows ||
+		    width / font->vfbd_width < cols)
+			continue;
+
 		next = STAILQ_NEXT(fl, font_next);
 
 		/*
@@ -2072,7 +2093,6 @@ gfx_get_font(void)
 		 * we have our font. Make sure, it actually is loaded.
 		 */
 		if (next == NULL || next->font_data->vfbd_height < size) {
-			font = fl->font_data;
 			if (font->vfbd_font == NULL ||
 			    fl->font_flags == FONT_RELOAD) {
 				if (fl->font_load != NULL &&
@@ -2081,6 +2101,7 @@ gfx_get_font(void)
 			}
 			break;
 		}
+		font = NULL;
 	}
 
 	return (font);
@@ -2111,7 +2132,7 @@ set_font(teken_unit_t *rows, teken_unit_t *cols, teken_unit_t h, teken_unit_t w)
 	}
 
 	if (font == NULL)
-		font = gfx_get_font();
+		font = gfx_get_font(*rows, *cols, h, w);
 
 	if (font != NULL) {
 		*rows = height / font->vfbd_height;

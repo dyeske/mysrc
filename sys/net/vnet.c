@@ -44,6 +44,7 @@
 #include <sys/kernel.h>
 #include <sys/jail.h>
 #include <sys/sdt.h>
+#include <sys/stdarg.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 #include <sys/eventhandler.h>
@@ -53,8 +54,6 @@
 #include <sys/socket.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
-
-#include <machine/stdarg.h>
 
 #ifdef DDB
 #include <ddb/ddb.h>
@@ -101,7 +100,7 @@ struct sx		vnet_sxlock;
 	sx_xunlock(&vnet_sxlock);					\
 } while (0)
 
-struct vnet_list_head vnet_head;
+struct vnet_list_head vnet_head = LIST_HEAD_INITIALIZER(vnet_head);
 struct vnet *vnet0;
 
 /*
@@ -318,7 +317,6 @@ vnet_init_prelink(void *arg __unused)
 	rw_init(&vnet_rwlock, "vnet_rwlock");
 	sx_init(&vnet_sxlock, "vnet_sxlock");
 	sx_init(&vnet_sysinit_sxlock, "vnet_sysinit_sxlock");
-	LIST_INIT(&vnet_head);
 }
 SYSINIT(vnet_init_prelink, SI_SUB_VNET_PRELINK, SI_ORDER_FIRST,
     vnet_init_prelink, NULL);

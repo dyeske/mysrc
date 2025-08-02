@@ -64,7 +64,6 @@
  * protocol-specific control block) are stored here.
  */
 CK_LIST_HEAD(inpcbhead, inpcb);
-CK_LIST_HEAD(inpcbporthead, inpcbport);
 CK_LIST_HEAD(inpcblbgrouphead, inpcblbgroup);
 typedef	uint64_t	inp_gen_t;
 
@@ -221,7 +220,6 @@ struct inpcb {
 		short	in6p_hops;
 	};
 	CK_LIST_ENTRY(inpcb) inp_portlist;	/* (r:e/w:h) port list */
-	struct	inpcbport *inp_phd;	/* (r:e/w:h) head of this list */
 	inp_gen_t	inp_gencnt;	/* (c) generation count */
 	void		*spare_ptr;	/* Spare pointer. */
 	rt_gen_t	inp_rt_cookie;	/* generation for route entry */
@@ -305,6 +303,30 @@ struct sockopt_parameters {
 	char sop_optval[];
 };
 
+#ifdef _SYS_KTLS_H_
+struct xktls_session {
+	uint32_t tsz;	/* total sz of elm, next elm is at this+tsz */
+	uint32_t fsz;	/* size of the struct up to keys */
+	uint64_t inp_gencnt;
+	kvaddr_t so_pcb;
+	struct in_conninfo coninf;
+	u_short rx_vlan_id;
+	struct xktls_session_onedir rcv;
+	struct xktls_session_onedir snd;
+/*
+ * Next are
+ * - keydata for rcv, first cipher of length rcv.cipher_key_len, then
+ *    authentication of length rcv.auth_key_len;
+ * - driver data (string) of length rcv.drv_st_len, if the rcv session is
+ *    offloaded to ifnet rcv.ifnet;
+ * - keydata for snd, first cipher of length snd.cipher_key_len, then
+ *    authentication of length snd.auth_key_len;
+ * - driver data (string) of length snd.drv_st_len, if the snd session is
+ *    offloaded to ifnet snd.ifnet;
+ */
+};
+#endif /* _SYS_KTLS_H_ */
+
 #ifdef	_KERNEL
 int	sysctl_setsockopt(SYSCTL_HANDLER_ARGS, struct inpcbinfo *pcbinfo,
 	    int (*ctloutput_set)(struct inpcb *, struct sockopt *));
@@ -370,7 +392,7 @@ struct inpcbinfo {
 	/*
 	 * Global hash of inpcbs, hashed by only local port number.
 	 */
-	struct inpcbporthead	*ipi_porthashbase;	/* (h) */
+	struct inpcbhead	*ipi_porthashbase;	/* (h) */
 	u_long			 ipi_porthashmask;	/* (h) */
 
 	/*
@@ -392,11 +414,9 @@ struct inpcbinfo {
  */
 struct inpcbstorage {
 	uma_zone_t	ips_zone;
-	uma_zone_t	ips_portzone;
 	uma_init	ips_pcbinit;
 	size_t		ips_size;
 	const char *	ips_zone_name;
-	const char *	ips_portzone_name;
 	const char *	ips_infolock_name;
 	const char *	ips_hashlock_name;
 };
@@ -414,7 +434,6 @@ static struct inpcbstorage prot = {					\
 	.ips_size = sizeof(struct ppcb),				\
 	.ips_pcbinit = prot##_inpcb_init,				\
 	.ips_zone_name = zname,						\
-	.ips_portzone_name = zname " ports",				\
 	.ips_infolock_name = iname,					\
 	.ips_hashlock_name = hname,					\
 };									\
@@ -422,29 +441,6 @@ SYSINIT(prot##_inpcbstorage_init, SI_SUB_PROTO_DOMAIN,			\
     SI_ORDER_SECOND, in_pcbstorage_init, &prot);			\
 SYSUNINIT(prot##_inpcbstorage_uninit, SI_SUB_PROTO_DOMAIN,		\
     SI_ORDER_SECOND, in_pcbstorage_destroy, &prot)
-
-/*
- * Load balance groups used for the SO_REUSEPORT_LB socket option. Each group
- * (or unique address:port combination) can be re-used at most
- * INPCBLBGROUP_SIZMAX (256) times. The inpcbs are stored in il_inp which
- * is dynamically resized as processes bind/unbind to that specific group.
- */
-struct inpcblbgroup {
-	CK_LIST_ENTRY(inpcblbgroup) il_list;
-	LIST_HEAD(, inpcb) il_pending;	/* PCBs waiting for listen() */
-	struct epoch_context il_epoch_ctx;
-	struct ucred	*il_cred;
-	uint16_t	il_lport;			/* (c) */
-	u_char		il_vflag;			/* (c) */
-	uint8_t		il_numa_domain;
-	uint32_t	il_pad2;
-	union in_dependaddr il_dependladdr;		/* (c) */
-#define	il_laddr	il_dependladdr.id46_addr.ia46_addr4
-#define	il6_laddr	il_dependladdr.id6_addr
-	uint32_t	il_inpsiz; /* max count in il_inp[] (h) */
-	uint32_t	il_inpcnt; /* cur count in il_inp[] (h) */
-	struct inpcb	*il_inp[];			/* (h) */
-};
 
 #define INP_LOCK_DESTROY(inp)	rw_destroy(&(inp)->inp_lock)
 #define INP_RLOCK(inp)		rw_rlock(&(inp)->inp_lock)
@@ -575,7 +571,7 @@ void 	inp_4tuple_get(struct inpcb *inp, uint32_t *laddr, uint16_t *lp,
 #define	INP_DROPPED		0x04000000 /* protocol drop flag */
 #define	INP_SOCKREF		0x08000000 /* strong socket reference */
 #define	INP_RESERVED_0          0x10000000 /* reserved field */
-#define	INP_RESERVED_1          0x20000000 /* reserved field */
+#define	INP_BOUNDFIB		0x20000000 /* Bound to a specific FIB. */
 #define	IN6P_RFC2292		0x40000000 /* used RFC2292 API on the socket */
 #define	IN6P_MTU		0x80000000 /* receive path MTU */
 
@@ -621,10 +617,11 @@ typedef	enum {
 	INPLOOKUP_WILDCARD = 0x00000001,	/* Allow wildcard sockets. */
 	INPLOOKUP_RLOCKPCB = 0x00000002,	/* Return inpcb read-locked. */
 	INPLOOKUP_WLOCKPCB = 0x00000004,	/* Return inpcb write-locked. */
+	INPLOOKUP_FIB = 0x00000008,		/* inp must be from same FIB. */
 } inp_lookup_t;
 
 #define	INPLOOKUP_MASK	(INPLOOKUP_WILDCARD | INPLOOKUP_RLOCKPCB | \
-	    INPLOOKUP_WLOCKPCB)
+	    INPLOOKUP_WLOCKPCB | INPLOOKUP_FIB)
 #define	INPLOOKUP_LOCKMASK	(INPLOOKUP_RLOCKPCB | INPLOOKUP_WLOCKPCB)
 
 #define	sotoinpcb(so)	((struct inpcb *)(so)->so_pcb)
@@ -662,17 +659,15 @@ void	in_pcbstorage_destroy(void *);
 
 void	in_pcbpurgeif0(struct inpcbinfo *, struct ifnet *);
 int	in_pcballoc(struct socket *, struct inpcbinfo *);
-int	in_pcbbind(struct inpcb *, struct sockaddr_in *, struct ucred *);
+#define	INPBIND_FIB	0x0001	/* bind to the PCB's FIB only */
+int	in_pcbbind(struct inpcb *, struct sockaddr_in *, int, struct ucred *);
 int	in_pcbbind_setup(struct inpcb *, struct sockaddr_in *, in_addr_t *,
-	    u_short *, struct ucred *);
+	    u_short *, int, struct ucred *);
 int	in_pcbconnect(struct inpcb *, struct sockaddr_in *, struct ucred *);
-int	in_pcbconnect_setup(struct inpcb *, struct sockaddr_in *, in_addr_t *,
-	    u_short *, in_addr_t *, u_short *, struct ucred *);
 void	in_pcbdisconnect(struct inpcb *);
 void	in_pcbdrop(struct inpcb *);
 void	in_pcbfree(struct inpcb *);
-int	in_pcbinshash(struct inpcb *);
-int	in_pcbladdr(struct inpcb *, struct in_addr *, struct in_addr *,
+int	in_pcbladdr(const struct inpcb *, struct in_addr *, struct in_addr *,
 	    struct ucred *);
 int	in_pcblbgroup_numa(struct inpcb *, int arg);
 void	in_pcblisten(struct inpcb *);
@@ -683,11 +678,10 @@ struct inpcb *
 	in_pcblookup_mbuf(struct inpcbinfo *, struct in_addr, u_int,
 	    struct in_addr, u_int, int, struct ifnet *, struct mbuf *);
 void	in_pcbref(struct inpcb *);
-void	in_pcbrehash(struct inpcb *);
-void	in_pcbremhash_locked(struct inpcb *);
 bool	in_pcbrele(struct inpcb *, inp_lookup_t);
 bool	in_pcbrele_rlocked(struct inpcb *);
 bool	in_pcbrele_wlocked(struct inpcb *);
+bool	in_pcbrele_rlock(struct inpcb *inp);
 
 typedef bool inp_match_t(const struct inpcb *, void *);
 struct inpcb_iterator {

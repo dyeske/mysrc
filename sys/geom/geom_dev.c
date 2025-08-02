@@ -52,10 +52,10 @@
 #include <sys/fcntl.h>
 #include <sys/limits.h>
 #include <sys/selinfo.h>
+#include <sys/stdarg.h>
 #include <sys/sysctl.h>
 #include <geom/geom.h>
 #include <geom/geom_int.h>
-#include <machine/stdarg.h>
 
 struct g_dev_softc {
 	struct mtx	 sc_mtx;
@@ -852,6 +852,9 @@ g_dev_orphan(struct g_consumer *cp)
 	sc = cp->private;
 	dev = sc->sc_dev;
 	g_trace(G_T_TOPOLOGY, "g_dev_orphan(%p(%s))", cp, cp->geom->name);
+
+	if (dev == NULL)
+		return;
 
 	/* Reset any dump-area set on this device */
 	if (dev->si_flags & SI_DUMPDEV) {

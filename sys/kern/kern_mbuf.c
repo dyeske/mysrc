@@ -61,8 +61,8 @@
 #include <vm/uma.h>
 #include <vm/uma_dbg.h>
 
-_Static_assert(MJUMPAGESIZE > MCLBYTES,
-    "Cluster must be smaller than a jumbo page");
+_Static_assert(MCLBYTES <= MJUMPAGESIZE,
+    "Cluster must not be larger than a jumbo page");
 
 /*
  * In FreeBSD, Mbufs and Mbuf Clusters are allocated from UMA
@@ -950,7 +950,7 @@ _mb_unmapped_to_ext(struct mbuf *m, struct mbuf **mres)
 
 	if (m->m_epg_tls != NULL) {
 		/* can't convert TLS mbuf */
-		m_freem(m);
+		m_free(m);
 		*mres = NULL;
 		return (EINVAL);
 	}
@@ -1099,7 +1099,7 @@ mb_unmapped_to_ext(struct mbuf *top, struct mbuf **mres)
 			error = _mb_unmapped_to_ext(m, &m1);
 			if (error != 0) {
 				if (top != m)
-					m_free(top);
+					m_freem(top);
 				m_freem(next);
 				*mres = NULL;
 				return (error);
@@ -1462,8 +1462,7 @@ m_getjcl(int how, short type, int flags, int size)
 
 /*
  * Allocate mchain of a given length of mbufs and/or clusters (whatever fits
- * best).  May fail due to ENOMEM.  In case of failure state of mchain is
- * inconsistent.
+ * best).  May fail due to ENOMEM.
  */
 int
 mc_get(struct mchain *mc, u_int length, int how, short type, int flags)
@@ -1501,8 +1500,9 @@ mc_get(struct mchain *mc, u_int length, int how, short type, int flags)
 			 * Fail the whole operation if one mbuf can't be
 			 * allocated.
 			 */
-			if (mb == NULL) {
+			if (__predict_false(mb == NULL)) {
 				m_freem(mc_first(mc));
+				*mc = MCHAIN_INITIALIZER(mc);
 				return (ENOMEM);
 			}
 		}

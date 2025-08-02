@@ -1030,29 +1030,22 @@ linux_setgroups(struct thread *td, struct linux_setgroups_args *args)
 {
 	struct ucred *newcred, *oldcred;
 	l_gid_t *linux_gidset;
-	gid_t *bsd_gidset;
 	int ngrp, error;
 	struct proc *p;
 
 	ngrp = args->gidsetsize;
-	if (ngrp < 0 || ngrp >= ngroups_max + 1)
+	if (ngrp < 0 || ngrp >= ngroups_max)
 		return (EINVAL);
 	linux_gidset = malloc(ngrp * sizeof(*linux_gidset), M_LINUX, M_WAITOK);
 	error = copyin(args->grouplist, linux_gidset, ngrp * sizeof(l_gid_t));
 	if (error)
 		goto out;
 	newcred = crget();
-	crextend(newcred, ngrp + 1);
+	crextend(newcred, ngrp);
 	p = td->td_proc;
 	PROC_LOCK(p);
 	oldcred = p->p_ucred;
 	crcopy(newcred, oldcred);
-
-	/*
-	 * cr_groups[0] holds egid. Setting the whole set from
-	 * the supplied set will cause egid to be changed too.
-	 * Keep cr_groups[0] unchanged to prevent that.
-	 */
 
 	if ((error = priv_check_cred(oldcred, PRIV_CRED_SETGROUPS)) != 0) {
 		PROC_UNLOCK(p);
@@ -1060,17 +1053,10 @@ linux_setgroups(struct thread *td, struct linux_setgroups_args *args)
 		goto out;
 	}
 
-	if (ngrp > 0) {
-		newcred->cr_ngroups = ngrp + 1;
-
-		bsd_gidset = newcred->cr_groups;
-		ngrp--;
-		while (ngrp >= 0) {
-			bsd_gidset[ngrp + 1] = linux_gidset[ngrp];
-			ngrp--;
-		}
-	} else
-		newcred->cr_ngroups = 1;
+	newcred->cr_ngroups = ngrp;
+	for (int i = 0; i < ngrp; i++)
+		newcred->cr_groups[i] = linux_gidset[i];
+	newcred->cr_flags |= CRED_FLAG_GROUPSET;
 
 	setsugid(p);
 	proc_set_cred(p, newcred);
@@ -1092,13 +1078,7 @@ linux_getgroups(struct thread *td, struct linux_getgroups_args *args)
 
 	cred = td->td_ucred;
 	bsd_gidset = cred->cr_groups;
-	bsd_gidsetsz = cred->cr_ngroups - 1;
-
-	/*
-	 * cr_groups[0] holds egid. Returning the whole set
-	 * here will cause a duplicate. Exclude cr_groups[0]
-	 * to prevent that.
-	 */
+	bsd_gidsetsz = cred->cr_ngroups;
 
 	if ((ngrp = args->gidsetsize) == 0) {
 		td->td_retval[0] = bsd_gidsetsz;
@@ -1112,7 +1092,7 @@ linux_getgroups(struct thread *td, struct linux_getgroups_args *args)
 	linux_gidset = malloc(bsd_gidsetsz * sizeof(*linux_gidset),
 	    M_LINUX, M_WAITOK);
 	while (ngrp < bsd_gidsetsz) {
-		linux_gidset[ngrp] = bsd_gidset[ngrp + 1];
+		linux_gidset[ngrp] = bsd_gidset[ngrp];
 		ngrp++;
 	}
 
@@ -2612,7 +2592,7 @@ linux_seccomp(struct thread *td, struct linux_seccomp_args *args)
  */
 static int
 linux_exec_copyin_args(struct image_args *args, const char *fname,
-    enum uio_seg segflg, l_uintptr_t *argv, l_uintptr_t *envv)
+    l_uintptr_t *argv, l_uintptr_t *envv)
 {
 	char *argp, *envp;
 	l_uintptr_t *ptr, arg;
@@ -2633,7 +2613,7 @@ linux_exec_copyin_args(struct image_args *args, const char *fname,
 	/*
 	 * Copy the file name.
 	 */
-	error = exec_args_add_fname(args, fname, segflg);
+	error = exec_args_add_fname(args, fname, UIO_USERSPACE);
 	if (error != 0)
 		goto err_exit;
 
@@ -2696,8 +2676,8 @@ linux_execve(struct thread *td, struct linux_execve_args *args)
 
 	LINUX_CTR(execve);
 
-	error = linux_exec_copyin_args(&eargs, args->path, UIO_USERSPACE,
-	    args->argp, args->envp);
+	error = linux_exec_copyin_args(&eargs, args->path, args->argp,
+	    args->envp);
 	if (error == 0)
 		error = linux_common_execve(td, &eargs);
 	AUDIT_SYSCALL_EXIT(error == EJUSTRETURN ? 0 : error, td);

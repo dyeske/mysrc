@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -189,8 +190,14 @@ zpl_snapdir_automount(struct path *path)
  * as of the 3.18 kernel revaliding the mountpoint dentry will result in
  * the snapshot being immediately unmounted.
  */
+#ifdef HAVE_D_REVALIDATE_4ARGS
+static int
+zpl_snapdir_revalidate(struct inode *dir, const struct qstr *name,
+    struct dentry *dentry, unsigned int flags)
+#else
 static int
 zpl_snapdir_revalidate(struct dentry *dentry, unsigned int flags)
+#endif
 {
 	return (!!dentry->d_inode);
 }
@@ -334,14 +341,20 @@ zpl_snapdir_rmdir(struct inode *dip, struct dentry *dentry)
 	return (error);
 }
 
+#if defined(HAVE_IOPS_MKDIR_USERNS)
 static int
-#ifdef HAVE_IOPS_MKDIR_USERNS
 zpl_snapdir_mkdir(struct user_namespace *user_ns, struct inode *dip,
     struct dentry *dentry, umode_t mode)
 #elif defined(HAVE_IOPS_MKDIR_IDMAP)
+static int
+zpl_snapdir_mkdir(struct mnt_idmap *user_ns, struct inode *dip,
+    struct dentry *dentry, umode_t mode)
+#elif defined(HAVE_IOPS_MKDIR_DENTRY)
+static struct dentry *
 zpl_snapdir_mkdir(struct mnt_idmap *user_ns, struct inode *dip,
     struct dentry *dentry, umode_t mode)
 #else
+static int
 zpl_snapdir_mkdir(struct inode *dip, struct dentry *dentry, umode_t mode)
 #endif
 {
@@ -369,7 +382,11 @@ zpl_snapdir_mkdir(struct inode *dip, struct dentry *dentry, umode_t mode)
 	ASSERT3S(error, <=, 0);
 	crfree(cr);
 
+#if defined(HAVE_IOPS_MKDIR_DENTRY)
+	return (ERR_PTR(error));
+#else
 	return (error);
+#endif
 }
 
 /*

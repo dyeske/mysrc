@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -73,6 +74,7 @@
 #include <sys/zfs_quota.h>
 #include <sys/zfs_sa.h>
 #include <sys/zfs_rlock.h>
+#include <sys/zfs_project.h>
 #include <sys/bio.h>
 #include <sys/buf.h>
 #include <sys/sched.h>
@@ -142,14 +144,14 @@ typedef ulong_t cookie_t;
  *  (3)	All range locks must be grabbed before calling dmu_tx_assign(),
  *	as they can span dmu_tx_assign() calls.
  *
- *  (4) If ZPL locks are held, pass TXG_NOWAIT as the second argument to
+ *  (4) If ZPL locks are held, pass DMU_TX_NOWAIT as the second argument to
  *      dmu_tx_assign().  This is critical because we don't want to block
  *      while holding locks.
  *
- *	If no ZPL locks are held (aside from zfs_enter()), use TXG_WAIT.  This
- *	reduces lock contention and CPU usage when we must wait (note that if
- *	throughput is constrained by the storage, nearly every transaction
- *	must wait).
+ *	If no ZPL locks are held (aside from zfs_enter()), use DMU_TX_WAIT.
+ *	This reduces lock contention and CPU usage when we must wait (note
+ *	that if throughput is constrained by the storage, nearly every
+ *	transaction must wait).
  *
  *      Note, in particular, that if a lock is sometimes acquired before
  *      the tx assigns, and sometimes after (e.g. z_lock), then failing
@@ -157,15 +159,16 @@ typedef ulong_t cookie_t;
  *
  *	Thread A has grabbed a lock before calling dmu_tx_assign().
  *	Thread B is in an already-assigned tx, and blocks for this lock.
- *	Thread A calls dmu_tx_assign(TXG_WAIT) and blocks in txg_wait_open()
- *	forever, because the previous txg can't quiesce until B's tx commits.
+ *	Thread A calls dmu_tx_assign(DMU_TX_WAIT) and blocks in
+ *	txg_wait_open() forever, because the previous txg can't quiesce
+ *	until B's tx commits.
  *
- *	If dmu_tx_assign() returns ERESTART and zfsvfs->z_assign is TXG_NOWAIT,
- *	then drop all locks, call dmu_tx_wait(), and try again.  On subsequent
- *	calls to dmu_tx_assign(), pass TXG_NOTHROTTLE in addition to TXG_NOWAIT,
- *	to indicate that this operation has already called dmu_tx_wait().
- *	This will ensure that we don't retry forever, waiting a short bit
- *	each time.
+ *	If dmu_tx_assign() returns ERESTART and zfsvfs->z_assign is
+ *	DMU_TX_NOWAIT, then drop all locks, call dmu_tx_wait(), and try
+ *	again.  On subsequent calls to dmu_tx_assign(), pass
+ *	DMU_TX_NOTHROTTLE in addition to DMU_TX_NOWAIT, to indicate that
+ *	this operation has already called dmu_tx_wait().  This will ensure
+ *	that we don't retry forever, waiting a short bit each time.
  *
  *  (5)	If the operation succeeded, generate the intent log entry for it
  *	before dropping locks.  This ensures that the ordering of events
@@ -187,7 +190,8 @@ typedef ulong_t cookie_t;
  *	rw_enter(...);			// grab any other locks you need
  *	tx = dmu_tx_create(...);	// get DMU tx
  *	dmu_tx_hold_*();		// hold each object you might modify
- *	error = dmu_tx_assign(tx, (waited ? TXG_NOTHROTTLE : 0) | TXG_NOWAIT);
+ *	error = dmu_tx_assign(tx,
+ *	    (waited ? DMU_TX_NOTHROTTLE : 0) | DMU_TX_NOWAIT);
  *	if (error) {
  *		rw_exit(...);		// drop locks
  *		zfs_dirent_unlock(dl);	// unlock directory entry
@@ -264,6 +268,71 @@ zfs_close(vnode_t *vp, int flag, int count, offset_t offset, cred_t *cr)
 }
 
 static int
+zfs_ioctl_getxattr(vnode_t *vp, zfsxattr_t *fsx)
+{
+	znode_t *zp = VTOZ(vp);
+
+	memset(fsx, 0, sizeof (*fsx));
+	fsx->fsx_xflags = (zp->z_pflags & ZFS_PROJINHERIT) ?
+	    ZFS_PROJINHERIT_FL : 0;
+	fsx->fsx_projid = zp->z_projid;
+
+	return (0);
+}
+
+static int
+zfs_ioctl_setflags(vnode_t *vp, uint32_t ioctl_flags, xvattr_t *xva)
+{
+	uint64_t zfs_flags = VTOZ(vp)->z_pflags;
+	xoptattr_t *xoap;
+
+	if (ioctl_flags & ~(ZFS_PROJINHERIT_FL))
+		return (SET_ERROR(EOPNOTSUPP));
+
+	xva_init(xva);
+	xoap = xva_getxoptattr(xva);
+
+#define	FLAG_CHANGE(iflag, zflag, xflag, xfield)	do {		\
+	if (((ioctl_flags & (iflag)) && !(zfs_flags & (zflag))) ||	\
+	    ((zfs_flags & (zflag)) && !(ioctl_flags & (iflag)))) {	\
+		XVA_SET_REQ(xva, (xflag));				\
+		(xfield) = ((ioctl_flags & (iflag)) != 0);		\
+	}								\
+} while (0)
+
+	FLAG_CHANGE(ZFS_PROJINHERIT_FL, ZFS_PROJINHERIT, XAT_PROJINHERIT,
+	    xoap->xoa_projinherit);
+
+#undef	FLAG_CHANGE
+
+	return (0);
+}
+
+static int
+zfs_ioctl_setxattr(vnode_t *vp, zfsxattr_t *fsx, cred_t *cr)
+{
+	znode_t *zp = VTOZ(vp);
+	xvattr_t xva;
+	xoptattr_t *xoap;
+	int err;
+
+	if (!zpl_is_valid_projid(fsx->fsx_projid))
+		return (SET_ERROR(EINVAL));
+
+	err = zfs_ioctl_setflags(vp, fsx->fsx_xflags, &xva);
+	if (err)
+		return (err);
+
+	xoap = xva_getxoptattr(&xva);
+	XVA_SET_REQ(&xva, XAT_PROJID);
+	xoap->xoa_projid = fsx->fsx_projid;
+
+	err = zfs_setattr(zp, (vattr_t *)&xva, 0, cr, NULL);
+
+	return (err);
+}
+
+static int
 zfs_ioctl(vnode_t *vp, ulong_t com, intptr_t data, int flag, cred_t *cred,
     int *rvalp)
 {
@@ -301,6 +370,36 @@ zfs_ioctl(vnode_t *vp, ulong_t com, intptr_t data, int flag, cred_t *cred,
 			return (error);
 		*(offset_t *)data = off;
 		return (0);
+	}
+	case ZFS_IOC_FSGETXATTR: {
+		zfsxattr_t *fsx = (zfsxattr_t *)data;
+		error = vn_lock(vp, LK_SHARED);
+		if (error)
+			return (error);
+		error = zfs_ioctl_getxattr(vp, fsx);
+		VOP_UNLOCK(vp);
+		return (error);
+	}
+	case ZFS_IOC_FSSETXATTR: {
+		zfsxattr_t *fsx = (zfsxattr_t *)data;
+		error = vn_lock(vp, LK_EXCLUSIVE);
+		if (error)
+			return (error);
+		error = zfs_ioctl_setxattr(vp, fsx, cred);
+		VOP_UNLOCK(vp);
+		return (error);
+	}
+	case ZFS_IOC_REWRITE: {
+		zfs_rewrite_args_t *args = (zfs_rewrite_args_t *)data;
+		if ((flag & FWRITE) == 0)
+			return (SET_ERROR(EBADF));
+		error = vn_lock(vp, LK_SHARED);
+		if (error)
+			return (error);
+		error = zfs_rewrite(VTOZ(vp), args->off, args->len,
+		    args->flags, args->arg);
+		VOP_UNLOCK(vp);
+		return (error);
 	}
 	}
 	return (SET_ERROR(ENOTTY));
@@ -515,7 +614,7 @@ mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
 			page_unhold(pp);
 		} else {
 			error = dmu_read_uio_dbuf(sa_get_db(zp->z_sa_hdl),
-			    uio, bytes);
+			    uio, bytes, DMU_READ_PREFETCH);
 		}
 		len -= bytes;
 		off = 0;
@@ -1044,7 +1143,7 @@ zfs_create(znode_t *dzp, const char *name, vattr_t *vap, int excl, int mode,
 		dmu_tx_hold_write(tx, DMU_NEW_OBJECT,
 		    0, acl_ids.z_aclp->z_acl_bytes);
 	}
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		zfs_acl_ids_free(&acl_ids);
 		dmu_tx_abort(tx);
@@ -1185,7 +1284,7 @@ zfs_remove_(vnode_t *dvp, vnode_t *vp, const char *name, cred_t *cr)
 	 */
 	dmu_tx_mark_netfree(tx);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		zfs_exit(zfsvfs, FTAG);
@@ -1408,7 +1507,7 @@ zfs_mkdir(znode_t *dzp, const char *dirname, vattr_t *vap, znode_t **zpp,
 	dmu_tx_hold_sa_create(tx, acl_ids.z_aclp->z_acl_bytes +
 	    ZFS_SA_BASE_ATTR_SIZE);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		zfs_acl_ids_free(&acl_ids);
 		dmu_tx_abort(tx);
@@ -1510,7 +1609,7 @@ zfs_rmdir_(vnode_t *dvp, vnode_t *vp, const char *name, cred_t *cr)
 	zfs_sa_upgrade_txholds(tx, zp);
 	zfs_sa_upgrade_txholds(tx, dzp);
 	dmu_tx_mark_netfree(tx);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		zfs_exit(zfsvfs, FTAG);
@@ -2043,6 +2142,132 @@ zfs_getattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr)
 }
 
 /*
+ * For the operation of changing file's user/group/project, we need to
+ * handle not only the main object that is assigned to the file directly,
+ * but also the ones that are used by the file via hidden xattr directory.
+ *
+ * Because the xattr directory may contains many EA entries, as to it may
+ * be impossible to change all of them via the transaction of changing the
+ * main object's user/group/project attributes. Then we have to change them
+ * via other multiple independent transactions one by one. It may be not good
+ * solution, but we have no better idea yet.
+ */
+static int
+zfs_setattr_dir(znode_t *dzp)
+{
+	zfsvfs_t	*zfsvfs = dzp->z_zfsvfs;
+	objset_t	*os = zfsvfs->z_os;
+	zap_cursor_t	zc;
+	zap_attribute_t	*zap;
+	znode_t		*zp = NULL;
+	dmu_tx_t	*tx = NULL;
+	uint64_t	uid, gid;
+	sa_bulk_attr_t	bulk[4];
+	int		count;
+	int		err;
+
+	zap = zap_attribute_alloc();
+	zap_cursor_init(&zc, os, dzp->z_id);
+	while ((err = zap_cursor_retrieve(&zc, zap)) == 0) {
+		count = 0;
+		if (zap->za_integer_length != 8 || zap->za_num_integers != 1) {
+			err = ENXIO;
+			break;
+		}
+
+		err = zfs_dirent_lookup(dzp, zap->za_name, &zp, ZEXISTS);
+		if (err == ENOENT)
+			goto next;
+		if (err)
+			break;
+
+		if (zp->z_uid == dzp->z_uid &&
+		    zp->z_gid == dzp->z_gid &&
+		    zp->z_projid == dzp->z_projid)
+			goto next;
+
+		tx = dmu_tx_create(os);
+		if (!(zp->z_pflags & ZFS_PROJID))
+			dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_TRUE);
+		else
+			dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
+
+		err = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (err)
+			break;
+
+		mutex_enter(&dzp->z_lock);
+
+		if (zp->z_uid != dzp->z_uid) {
+			uid = dzp->z_uid;
+			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_UID(zfsvfs), NULL,
+			    &uid, sizeof (uid));
+			zp->z_uid = uid;
+		}
+
+		if (zp->z_gid != dzp->z_gid) {
+			gid = dzp->z_gid;
+			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_GID(zfsvfs), NULL,
+			    &gid, sizeof (gid));
+			zp->z_gid = gid;
+		}
+
+		uint64_t projid = dzp->z_projid;
+		if (zp->z_projid != projid) {
+			if (!(zp->z_pflags & ZFS_PROJID)) {
+				err = sa_add_projid(zp->z_sa_hdl, tx, projid);
+				if (unlikely(err == EEXIST)) {
+					err = 0;
+				} else if (err != 0) {
+					goto sa_add_projid_err;
+				} else {
+					projid = ZFS_INVALID_PROJID;
+				}
+			}
+
+			if (projid != ZFS_INVALID_PROJID) {
+				zp->z_projid = projid;
+				SA_ADD_BULK_ATTR(bulk, count,
+				    SA_ZPL_PROJID(zfsvfs), NULL, &zp->z_projid,
+				    sizeof (zp->z_projid));
+			}
+		}
+
+sa_add_projid_err:
+		mutex_exit(&dzp->z_lock);
+
+		if (likely(count > 0)) {
+			err = sa_bulk_update(zp->z_sa_hdl, bulk, count, tx);
+			dmu_tx_commit(tx);
+		} else if (projid == ZFS_INVALID_PROJID) {
+			dmu_tx_commit(tx);
+		} else {
+			dmu_tx_abort(tx);
+		}
+		tx = NULL;
+		if (err != 0 && err != ENOENT)
+			break;
+
+next:
+		if (zp) {
+			zrele(zp);
+			zp = NULL;
+		}
+		zap_cursor_advance(&zc);
+	}
+
+	if (tx)
+		dmu_tx_abort(tx);
+	if (zp) {
+		zrele(zp);
+	}
+	zap_cursor_fini(&zc);
+	zap_attribute_free(zap);
+
+	return (err == ENOENT ? 0 : err);
+}
+
+/*
  * Set the file attributes to the values contained in the
  * vattr structure.
  *
@@ -2087,6 +2312,7 @@ zfs_setattr(znode_t *zp, vattr_t *vap, int flags, cred_t *cr, zidmap_t *mnt_ns)
 	zfs_acl_t	*aclp;
 	boolean_t skipaclchk = (flags & ATTR_NOACLCHECK) ? B_TRUE : B_FALSE;
 	boolean_t	fuid_dirtied = B_FALSE;
+	boolean_t	handle_eadir = B_FALSE;
 	sa_bulk_attr_t	bulk[7], xattr_bulk[7];
 	int		count = 0, xattr_count = 0;
 
@@ -2438,6 +2664,7 @@ zfs_setattr(znode_t *zp, vattr_t *vap, int flags, cred_t *cr, zidmap_t *mnt_ns)
 	mask = vap->va_mask;
 
 	if ((mask & (AT_UID | AT_GID)) || projid != ZFS_INVALID_PROJID) {
+		handle_eadir = B_TRUE;
 		err = sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
 		    &xattr_obj, sizeof (xattr_obj));
 
@@ -2542,7 +2769,7 @@ zfs_setattr(znode_t *zp, vattr_t *vap, int flags, cred_t *cr, zidmap_t *mnt_ns)
 
 	zfs_sa_upgrade_txholds(tx, zp);
 
-	err = dmu_tx_assign(tx, TXG_WAIT);
+	err = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (err)
 		goto out;
 
@@ -2767,6 +2994,10 @@ out:
 	} else {
 		err2 = sa_bulk_update(zp->z_sa_hdl, bulk, count, tx);
 		dmu_tx_commit(tx);
+		if (attrzp) {
+			if (err2 == 0 && handle_eadir)
+				err = zfs_setattr_dir(attrzp);
+		}
 	}
 
 out2:
@@ -3243,7 +3474,7 @@ zfs_do_rename_impl(vnode_t *sdvp, vnode_t **svpp, struct componentname *scnp,
 
 	zfs_sa_upgrade_txholds(tx, szp);
 	dmu_tx_hold_zap(tx, zfsvfs->z_unlinkedobj, FALSE, NULL);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		goto out_seq;
@@ -3423,8 +3654,7 @@ zfs_symlink(znode_t *dzp, const char *name, vattr_t *vap,
 		return (error);
 	}
 
-	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids,
-	    0 /* projid */)) {
+	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, ZFS_DEFAULT_PROJID)) {
 		zfs_acl_ids_free(&acl_ids);
 		zfs_exit(zfsvfs, FTAG);
 		return (SET_ERROR(EDQUOT));
@@ -3444,7 +3674,7 @@ zfs_symlink(znode_t *dzp, const char *name, vattr_t *vap,
 	}
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		zfs_acl_ids_free(&acl_ids);
 		dmu_tx_abort(tx);
@@ -3663,7 +3893,7 @@ zfs_link(znode_t *tdzp, znode_t *szp, const char *name, cred_t *cr,
 	dmu_tx_hold_zap(tx, tdzp->z_id, TRUE, name);
 	zfs_sa_upgrade_txholds(tx, szp);
 	zfs_sa_upgrade_txholds(tx, tdzp);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		zfs_exit(zfsvfs, FTAG);
@@ -3792,7 +4022,7 @@ zfs_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 
 		dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 		zfs_sa_upgrade_txholds(tx, zp);
-		error = dmu_tx_assign(tx, TXG_WAIT);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error) {
 			dmu_tx_abort(tx);
 		} else {
@@ -4163,7 +4393,7 @@ zfs_putpages(struct vnode *vp, vm_page_t *ma, size_t len, int flags,
 
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
-	err = dmu_tx_assign(tx, TXG_WAIT);
+	err = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (err != 0) {
 		dmu_tx_abort(tx);
 		goto out;
@@ -6040,6 +6270,78 @@ zfs_freebsd_aclcheck(struct vop_aclcheck_args *ap)
 	return (EOPNOTSUPP);
 }
 
+#ifndef _SYS_SYSPROTO_H_
+struct vop_advise_args {
+	struct vnode *a_vp;
+	off_t a_start;
+	off_t a_end;
+	int a_advice;
+};
+#endif
+
+static int
+zfs_freebsd_advise(struct vop_advise_args *ap)
+{
+	vnode_t *vp = ap->a_vp;
+	off_t start = ap->a_start;
+	off_t end = ap->a_end;
+	int advice = ap->a_advice;
+	off_t len;
+	znode_t *zp;
+	zfsvfs_t *zfsvfs;
+	objset_t *os;
+	int error = 0;
+
+	if (end < start)
+		return (EINVAL);
+
+	error = vn_lock(vp, LK_SHARED);
+	if (error)
+		return (error);
+
+	zp = VTOZ(vp);
+	zfsvfs = zp->z_zfsvfs;
+	os = zp->z_zfsvfs->z_os;
+
+	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		goto out_unlock;
+
+	/* kern_posix_fadvise points to the last byte, we want one past */
+	if (end != OFF_MAX)
+		end += 1;
+	len = end - start;
+
+	switch (advice) {
+	case POSIX_FADV_WILLNEED:
+		/*
+		 * Pass on the caller's size directly, but note that
+		 * dmu_prefetch_max will effectively cap it.  If there really
+		 * is a larger sequential access pattern, perhaps dmu_zfetch
+		 * will detect it.
+		 */
+		dmu_prefetch(os, zp->z_id, 0, start, len,
+		    ZIO_PRIORITY_ASYNC_READ);
+		break;
+	case POSIX_FADV_NORMAL:
+	case POSIX_FADV_RANDOM:
+	case POSIX_FADV_SEQUENTIAL:
+	case POSIX_FADV_DONTNEED:
+	case POSIX_FADV_NOREUSE:
+		/* ignored for now */
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	zfs_exit(zfsvfs, FTAG);
+
+out_unlock:
+	VOP_UNLOCK(vp);
+
+	return (error);
+}
+
 static int
 zfs_vptocnp(struct vop_vptocnp_args *ap)
 {
@@ -6276,6 +6578,7 @@ struct vop_vector zfs_vnodeops = {
 	.vop_link =		zfs_freebsd_link,
 	.vop_symlink =		zfs_freebsd_symlink,
 	.vop_readlink =		zfs_freebsd_readlink,
+	.vop_advise =		zfs_freebsd_advise,
 	.vop_read =		zfs_freebsd_read,
 	.vop_write =		zfs_freebsd_write,
 	.vop_remove =		zfs_freebsd_remove,

@@ -2394,10 +2394,10 @@ static struct asc_table_entry asc_table[] = {
 	/* D              */
 	{ SST(0x3F, 0x1A, SS_RDEF,	/* XXX TBD */
 	    "Subsidiary binding changed") },
-	{ SST(0x40, 0x00, SS_RDEF,
+	{ SST(0x40, 0x00, SS_FATAL | ENXIO,
 	    "RAM failure") },		/* deprecated - use 40 NN instead */
 	/* DTLPWROMAEBKVF */
-	{ SST(0x40, 0x80, SS_RDEF,
+	{ SST(0x40, 0x80, SS_FATAL | ENXIO,
 	    "Diagnostic failure: ASCQ = Component ID") },
 	/* DTLPWROMAEBKVF */
 	{ SST(0x40, 0xFF, SS_RDEF | SSQ_RANGE,
@@ -3419,7 +3419,15 @@ fetchtableentries(int sense_key, int asc, int ascq,
 				      ascentrycomp);
 
 		if (found_entry) {
+			/*
+			 * If we get to the SSQ_RANGE entry, we're one too
+			 * far. The prior entry is the interesting one, since it
+			 * contains the string to print, etc. Only the top end
+			 * range is interesting in this entry.
+			 */
 			*asc_entry = (struct asc_table_entry *)found_entry;
+			if (((*asc_entry)->action & SSQ_RANGE) != 0)
+				(*asc_entry)--;
 			break;
 		}
 	}
@@ -3700,11 +3708,7 @@ scsi_command_string(struct cam_device *device, struct ccb_scsiio *csio,
 	/*
 	 * Get the device information.
 	 */
-	xpt_setup_ccb(&cgd->ccb_h,
-		      csio->ccb_h.path,
-		      CAM_PRIORITY_NORMAL);
-	cgd->ccb_h.func_code = XPT_GDEV_TYPE;
-	xpt_action((union ccb *)cgd);
+	xpt_gdev_type(cgd, csio->ccb_h.path);
 
 	/*
 	 * If the device is unconfigured, just pretend that it is a hard
@@ -5136,11 +5140,7 @@ scsi_sense_sbuf(struct cam_device *device, struct ccb_scsiio *csio,
 	/*
 	 * Get the device information.
 	 */
-	xpt_setup_ccb(&cgd->ccb_h,
-		      csio->ccb_h.path,
-		      CAM_PRIORITY_NORMAL);
-	cgd->ccb_h.func_code = XPT_GDEV_TYPE;
-	xpt_action((union ccb *)cgd);
+	xpt_gdev_type(cgd, csio->ccb_h.path);
 
 	/*
 	 * If the device is unconfigured, just pretend that it is a hard

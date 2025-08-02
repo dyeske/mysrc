@@ -34,6 +34,7 @@
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/socket.h>
+#include <sys/stdarg.h>
 #include <sys/priv.h>
 
 #include <netlink/netlink.h>
@@ -41,7 +42,6 @@
 #include <netlink/netlink_generic.h>
 #include <netlink/netlink_message_parser.h>
 
-#include <machine/stdarg.h>
 #include <tests/ktest.h>
 
 struct mtx ktest_mtx;
@@ -360,18 +360,17 @@ static const struct genl_cmd ktest_cmds[] = {
 	},
 };
 
+static int family_id;
 static void
 ktest_nl_register(void)
 {
 	bool ret __diagused;
-	int family_id __diagused;
 
 	NL_VERIFY_PARSERS(all_parsers);
 	family_id = genl_register_family(KTEST_FAMILY_NAME, 0, 1, KTEST_CMD_MAX);
 	MPASS(family_id != 0);
 
-	ret = genl_register_cmds(KTEST_FAMILY_NAME, ktest_cmds,
-	    nitems(ktest_cmds));
+	ret = genl_register_cmds(family_id, ktest_cmds, nitems(ktest_cmds));
 	MPASS(ret);
 }
 
@@ -380,7 +379,7 @@ ktest_nl_unregister(void)
 {
 	MPASS(TAILQ_EMPTY(&module_list));
 
-	genl_unregister_family(KTEST_FAMILY_NAME);
+	genl_unregister_family(family_id);
 }
 
 static int

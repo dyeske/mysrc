@@ -434,7 +434,7 @@ sys___acl_get_fd(struct thread *td, struct __acl_get_fd_args *uap)
 
 	AUDIT_ARG_FD(uap->filedes);
 	error = getvnode_path(td, uap->filedes,
-	    cap_rights_init_one(&rights, CAP_ACL_GET), &fp);
+	    cap_rights_init_one(&rights, CAP_ACL_GET), NULL, &fp);
 	if (error == 0) {
 		error = vacl_get_acl(td, fp->f_vnode, uap->type, uap->aclp);
 		fdrop(fp, td);
@@ -551,6 +551,7 @@ kern___acl_aclcheck_path(struct thread *td, const char *path, acl_type_t type,
 	error = namei(&nd);
 	if (error == 0) {
 		error = vacl_aclcheck(td, nd.ni_vp, type, aclp);
+		vrele(nd.ni_vp);
 		NDFREE_PNBUF(&nd);
 	}
 	return (error);
@@ -568,7 +569,7 @@ sys___acl_aclcheck_fd(struct thread *td, struct __acl_aclcheck_fd_args *uap)
 
 	AUDIT_ARG_FD(uap->filedes);
 	error = getvnode_path(td, uap->filedes,
-	    cap_rights_init_one(&rights, CAP_ACL_CHECK), &fp);
+	    cap_rights_init_one(&rights, CAP_ACL_CHECK), NULL, &fp);
 	if (error == 0) {
 		error = vacl_aclcheck(td, fp->f_vnode, uap->type, uap->aclp);
 		fdrop(fp, td);

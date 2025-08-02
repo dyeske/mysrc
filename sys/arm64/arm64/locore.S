@@ -45,6 +45,12 @@
  * space, the same as a single level 2 page with 4k pages.
  */
 #define	L3_PAGE_COUNT	32
+#elif PAGE_SIZE == PAGE_SIZE_4K
+/*
+ * Space for a level 3 table holding the end of the executable memory and
+ * the start of the non-executable data.
+ */
+#define	L3_PAGE_COUNT	1
 #endif
 
 /*
@@ -84,9 +90,9 @@ ENTRY(_start)
 	/*
 	 * At this point:
 	 * x27 = TTBR0 table
-	 * x26 = Kernel L1 table
 	 * x24 = TTBR1 table
 	 * x22 = PTE shareability attributes
+	 * x21 = BTI guarded page attribute if supported
 	 */
 
 	/* Enable the mmu */
@@ -136,9 +142,13 @@ virtdone:
 	str	x27, [x0, #BP_KERN_TTBR0]
 	str	x23, [x0, #BP_BOOT_EL]
 
-	/* Set this before it's used in kasan_init_early */
+	/* Set these before they are used in kasan_init_early */
 	adrp	x1, pmap_sh_attr
 	str	x22, [x1, :lo12:pmap_sh_attr]
+#ifdef __ARM_FEATURE_BTI_DEFAULT
+	adrp	x1, pmap_gp_attr
+	str	x21, [x1, :lo12:pmap_gp_attr]
+#endif
 
 #ifdef KASAN
 	/* Save bootparams */
@@ -344,7 +354,7 @@ LENTRY(enter_kernel_el)
 	isb
 
 	/* Configure the Hypervisor */
-	ldr	x2, =(HCR_RW | HCR_APK | HCR_API | HCR_E2H)
+	ldr	x2, =(HCR_RW | HCR_APK | HCR_API)
 	msr	hcr_el2, x2
 
 	/* Stash value of HCR_EL2 for later */
@@ -363,15 +373,15 @@ LENTRY(enter_kernel_el)
 	ldr	x2, =INIT_SCTLR_EL1
 	msr	sctlr_el1, x2
 
-	/* Check if the E2H flag is set */
-	tst	x4, #HCR_E2H
-	b.eq	.Lno_vhe
+	/* Check for VHE */
+	CHECK_CPU_FEAT(x2, ID_AA64MMFR1, VH, .Lno_vhe)
 
 	/*
 	 * The kernel will be running in EL2, route exceptions here rather
 	 * than EL1.
 	 */
-	orr	x4, x4, #(HCR_TGE)
+	orr	x4, x4, #HCR_E2H
+	orr	x4, x4, #HCR_TGE
 	msr	hcr_el2, x4
 	isb
 
@@ -403,10 +413,7 @@ LENTRY(enter_kernel_el)
 	 * Configure the Extended Hypervisor register. This is only valid if
 	 * FEAT_HCX is enabled.
 	 */
-	mrs x2, id_aa64mmfr1_el1
-	ubfx x2, x2, #ID_AA64MMFR1_HCX_SHIFT, #ID_AA64MMFR1_HCX_WIDTH
-	cbz x2, 2f
-
+	CHECK_CPU_FEAT(x2, ID_AA64MMFR1, HCX, 2f)
 	/* Extended Hypervisor Configuration */
 	mov x2, xzr
 	msr HCRX_EL2_REG, x2
@@ -422,12 +429,8 @@ LENTRY(enter_kernel_el)
 	/* Zero vttbr_el2 so a hypervisor can tell the host and guest apart */
 	msr	vttbr_el2, xzr
 
-	/* Configure GICv3 CPU interface */
-	mrs	x2, id_aa64pfr0_el1
-	/* Extract GIC bits from the register */
-	ubfx	x2, x2, #ID_AA64PFR0_GIC_SHIFT, #ID_AA64PFR0_GIC_BITS
-	/* GIC[3:0] != 0000 - GIC CPU interface via special regs. supported */
-	cbz	x2, 3f
+	/* Check the CPU supports GIC, and configure the CPU interface */
+	CHECK_CPU_FEAT(x2, ID_AA64PFR0, GIC, 3f)
 
 	mrs	x2, icc_sre_el2
 	orr	x2, x2, #ICC_SRE_EL2_EN	/* Enable access from insecure EL1 */
@@ -483,7 +486,6 @@ LENTRY(create_pagetables)
 	/* Clean the page table */
 	adrp	x6, pagetable
 	add	x6, x6, :lo12:pagetable
-	mov	x26, x6
 	adrp	x27, pagetable_end
 	add	x27, x27, :lo12:pagetable_end
 1:
@@ -493,6 +495,17 @@ LENTRY(create_pagetables)
 	stp	xzr, xzr, [x6], #16
 	cmp	x6, x27
 	b.lo	1b
+
+#ifdef __ARM_FEATURE_BTI_DEFAULT
+	/*
+	 * Check if the CPU supports BTI
+	 */
+	mrs	x6, id_aa64pfr1_el1		/* Read the ID register */
+	and	x6, x6, ID_AA64PFR1_BT_MASK	/* Mask the field we need */
+	cmp	x6, xzr				/* Check it's non-zero */
+	cset	x6, ne				/* x6 is set if non-zero */
+	lsl	x21, x6, ATTR_S1_GP_SHIFT	/* Shift to the correct bit */
+#endif
 
 	/*
 	 * Find the shareability attribute we should use. If FEAT_LPA2 is
@@ -582,60 +595,119 @@ common:
 	 * with 2M alignment.
 	 */
 #define	PTE_SHIFT	L3_SHIFT
+#define	LL_PAGE_TABLE	pagetable_l3_ttbr1
 #define	BUILD_PTE_FUNC	build_l3_page_pagetable
 #else
 #define	PTE_SHIFT	L2_SHIFT
+#define	LL_PAGE_TABLE	pagetable_l2_ttbr1
 #define	BUILD_PTE_FUNC	build_l2_block_pagetable
 #endif
 
 	/* Get the number of blocks/pages to allocate, rounded down */
-	lsr	x10, x8, #(PTE_SHIFT)
+	lsr	x14, x8, #(PTE_SHIFT)
 
-	/* Create the kernel space PTE table */
-	mov	x6, x26
-	mov	x7, #(ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK))
-	mov	x8, #(KERNBASE)
-	mov	x9, x28
-	bl	BUILD_PTE_FUNC
-
-#undef PTE_SHIFT
-#undef BUILD_PTE_FUNC
-
+	ldr	x26, =etext
 #if PAGE_SIZE != PAGE_SIZE_4K
-	/* Move to the l2 table */
-	ldr	x9, =(PAGE_SIZE * L3_PAGE_COUNT)
-	add	x26, x26, x9
+	ldr	x8, =((1 << PTE_SHIFT) - 1)
+	add	x26, x26, x8
+#endif
+	mov	x8, #(KERNBASE)
+	sub	x25, x26, x8
+	lsr	x25, x25, #(PTE_SHIFT)
+
+#if PAGE_SIZE == PAGE_SIZE_4K
+	/* Calculate the number of executable level 3 pages to create */
+	lsr	x26, x26, #(L3_SHIFT)
+	bfc	x26, #(Ln_ENTRIES_SHIFT), #(64 - Ln_ENTRIES_SHIFT)
+
+	/* Build the L3 table holding the end of the exectuable code */
+	lsl	x15, x25, #(PTE_SHIFT)
+	adrp	x6, pagetable_l3_ttbr1
+	add	x6, x6, :lo12:pagetable_l3_ttbr1
+	ldr	x7, =(ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK) | \
+	    ATTR_S1_AP(ATTR_S1_AP_RO))
+	ldr	x8, =(KERNBASE)
+	add	x8, x8, x15
+	add	x9, x28, x15
+	mov	x10, x26
+	bl	build_l3_page_pagetable
+
+	/* Build the remaining level 3 pages */
+	ldr	x7, =(ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK) | ATTR_S1_XN)
+	lsl	x27, x26, #(L3_SHIFT)
+	add	x8, x8, x27
+	add	x9, x28, x15
+	add	x9, x9, x27
+	ldr	x10, =(Ln_ENTRIES)
+	sub	x10, x10, x26
+	bl	build_l3_page_pagetable
 
 	/* Link the l2 -> l3 table */
 	mov	x9, x6
-	mov	x6, x26
+	adrp	x6, pagetable_l2_ttbr1
+	add	x6, x6, :lo12:pagetable_l2_ttbr1
 	bl	link_l2_pagetable
 #endif
 
-	/* Move to the l1 table */
-	add	x26, x26, #PAGE_SIZE
+	/* Create the kernel space PTE table */
+	adrp	x6, LL_PAGE_TABLE
+	add	x6, x6, :lo12:LL_PAGE_TABLE
+	ldr	x7, =(ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK) | \
+	    ATTR_S1_AP(ATTR_S1_AP_RO))
+	mov	x8, #(KERNBASE)
+	mov	x9, x28
+	mov	x10, x25
+	bl	BUILD_PTE_FUNC
+
+#if PAGE_SIZE == PAGE_SIZE_4K
+	/* Skip memory mapped through the L2 table */
+	add	x25, x25, #1
+#endif
+
+	/* Create the kernel space XN PTE table */
+	lsl	x10, x25, #(PTE_SHIFT)
+	ldr	x7, =(ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK) | ATTR_S1_XN)
+	ldr	x8, =(KERNBASE)
+	add	x8, x8, x10
+	add	x9, x28, x10
+	sub	x10, x14, x25
+	bl	BUILD_PTE_FUNC
+
+#undef PTE_SHIFT
+#undef LL_PAGE_TABLE
+#undef BUILD_PTE_FUNC
+
+#if PAGE_SIZE != PAGE_SIZE_4K
+	/* Link the l2 -> l3 table */
+	mov	x9, x6
+	adrp	x6, pagetable_l2_ttbr1
+	add	x6, x6, :lo12:pagetable_l2_ttbr1
+	bl	link_l2_pagetable
+#endif
 
 	/* Link the l1 -> l2 table */
 	mov	x9, x6
-	mov	x6, x26
+	adrp	x6, pagetable_l1_ttbr1
+	add	x6, x6, :lo12:pagetable_l1_ttbr1
 	bl	link_l1_pagetable
-
-	/* Move to the l0 table */
-	add	x24, x26, #PAGE_SIZE
 
 	/* Link the l0 -> l1 table */
 	mov	x9, x6
-	mov	x6, x24
+	adrp	x6, pagetable_l0_ttbr1
+	add	x6, x6, :lo12:pagetable_l0_ttbr1
 	mov	x10, #1
 	bl	link_l0_pagetable
+
+	/* Save the TTBR1 table physical address */
+	mov	x24, x6
 
 	/*
 	 * Build the TTBR0 maps.  As TTBR0 maps, they must specify ATTR_S1_nG.
 	 * They are only needed early on, so the VA = PA map is uncached.
 	 */
-	add	x27, x24, #PAGE_SIZE
 
-	mov	x6, x27		/* The initial page table */
+	adrp	x6, pagetable_l2_ttbr0_bootstrap
+	add	x6, x6, :lo12:pagetable_l2_ttbr0_bootstrap
 
 	/* Create the VA = PA map */
 	mov	x7, #(ATTR_S1_nG | ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK))
@@ -683,22 +755,21 @@ common:
 1:
 #endif
 
-	/* Move to the l1 table */
-	add	x27, x27, #PAGE_SIZE
-
 	/* Link the l1 -> l2 table */
 	mov	x9, x6
-	mov	x6, x27
+	adrp	x6, pagetable_l1_ttbr0_bootstrap
+	add	x6, x6, :lo12:pagetable_l1_ttbr0_bootstrap
 	bl	link_l1_pagetable
-
-	/* Move to the l0 table */
-	add	x27, x27, #PAGE_SIZE
 
 	/* Link the l0 -> l1 table */
 	mov	x9, x6
-	mov	x6, x27
+	adrp	x6, pagetable_l0_ttbr0_bootstrap
+	add	x6, x6, :lo12:pagetable_l0_ttbr0_bootstrap
 	mov	x10, #1
 	bl	link_l0_pagetable
+
+	/* Save the TTBR0 table physical address */
+	mov	x27, x6
 
 	/* Restore the Link register */
 	mov	x30, x5
@@ -792,7 +863,7 @@ LENTRY(build_l2_block_pagetable)
 	orr	x12, x12, #(ATTR_AF)
 	orr	x12, x12, #(ATTR_S1_UXN)
 #ifdef __ARM_FEATURE_BTI_DEFAULT
-	orr	x12, x12, #(ATTR_S1_GP)
+	orr	x12, x12, x21
 #endif
 	/* Set the shareability attribute */
 	orr	x12, x12, x22
@@ -814,7 +885,6 @@ LENTRY(build_l2_block_pagetable)
 	ret
 LEND(build_l2_block_pagetable)
 
-#if PAGE_SIZE != PAGE_SIZE_4K
 /*
  * Builds an L2 -> L3 table descriptor
  *
@@ -858,6 +928,7 @@ LEND(link_l2_pagetable)
  * VA start (x8) modulo L3C_SIZE must equal PA start (x9) modulo L3C_SIZE.
  */
 LENTRY(build_l3_page_pagetable)
+	cbz	x10, 2f
 	/*
 	 * Build the L3 table entry.
 	 */
@@ -870,7 +941,7 @@ LENTRY(build_l3_page_pagetable)
 	orr	x12, x12, #(ATTR_AF)
 	orr	x12, x12, #(ATTR_S1_UXN)
 #ifdef __ARM_FEATURE_BTI_DEFAULT
-	orr	x12, x12, #(ATTR_S1_GP)
+	orr	x12, x12, x21
 #endif
 	/* Set the shareability attribute */
 	orr	x12, x12, x22
@@ -897,10 +968,10 @@ LENTRY(build_l3_page_pagetable)
 	add	x11, x11, #1
 	add	x9, x9, #1
 	cbnz	x10, 1b
+2:
 
 	ret
 LEND(build_l3_page_pagetable)
-#endif
 
 LENTRY(start_mmu)
 	dsb	sy
@@ -958,9 +1029,7 @@ LENTRY(start_mmu)
 	 * HW management of dirty state is set in C code as it may
 	 * need to be disabled because of CPU errata.
 	 */
-	mrs	x3, id_aa64mmfr1_el1
-	and	x3, x3, #(ID_AA64MMFR1_HAFDBS_MASK)
-	cbz	x3, 1f
+	CHECK_CPU_FEAT(x3, ID_AA64MMFR1, HAFDBS, 1f)
 	orr	x2, x2, #(TCR_HA)
 1:
 
@@ -1033,10 +1102,9 @@ initstack_end:
 	 */
 	.globl pagetable_l0_ttbr1
 pagetable:
-#if PAGE_SIZE != PAGE_SIZE_4K
+pagetable_l3_ttbr1:
 	.space	(PAGE_SIZE * L3_PAGE_COUNT)
 pagetable_l2_ttbr1:
-#endif
 	.space	PAGE_SIZE
 pagetable_l1_ttbr1:
 	.space	PAGE_SIZE

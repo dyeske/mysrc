@@ -143,9 +143,18 @@ struct pfctl_eth_anchor {
 	int				 match;	/* XXX: used for pfctl black magic */
 };
 
+struct pfctl_pooladdr {
+	struct pf_addr_wrap		 addr;
+	TAILQ_ENTRY(pfctl_pooladdr)	 entries;
+	char				 ifname[IFNAMSIZ];
+	sa_family_t		 	 af;
+};
+
+TAILQ_HEAD(pfctl_palist, pfctl_pooladdr);
+
 struct pfctl_pool {
-	struct pf_palist	 list;
-	struct pf_pooladdr	*cur;
+	struct pfctl_palist	 list;
+	struct pfctl_pooladdr	*cur;
 	struct pf_poolhashkey	 key;
 	struct pf_addr		 counter;
 	struct pf_mape_portset	 mape;
@@ -157,6 +166,13 @@ struct pfctl_pool {
 struct pfctl_rules_info {
 	uint32_t	nr;
 	uint32_t	ticket;
+};
+
+struct pfctl_threshold {
+	uint32_t		limit;
+	uint32_t		seconds;
+	uint32_t		count;
+	uint32_t		last;
 };
 
 struct pfctl_rule {
@@ -181,6 +197,7 @@ struct pfctl_rule {
 		struct pfctl_pool	 rdr;
 	};
 	struct pfctl_pool	 route;
+	struct pfctl_threshold	 pktrate;
 
 	uint64_t		 evaluations;
 	uint64_t		 packets[2];
@@ -203,6 +220,7 @@ struct pfctl_rule {
 		uint32_t		limit;
 		uint32_t		seconds;
 	}			 max_src_conn_rate;
+	uint16_t		 max_pkt_size;
 	uint32_t		 qid;
 	uint32_t		 pqid;
 	uint16_t		 dnpipe;
@@ -216,6 +234,7 @@ struct pfctl_rule {
 	uint64_t		 states_cur;
 	uint64_t		 states_tot;
 	uint64_t		 src_nodes;
+	uint64_t		 src_nodes_type[PF_SN_MAX];
 
 	uint16_t		 return_icmp;
 	uint16_t		 return_icmp6;
@@ -227,6 +246,7 @@ struct pfctl_rule {
 	struct pf_rule_uid	 uid;
 	struct pf_rule_gid	 gid;
 	char			 rcv_ifname[IFNAMSIZ];
+	bool			 rcvifnot;
 
 	uint32_t		 rule_flag;
 	uint8_t			 action;
@@ -372,6 +392,8 @@ struct pfctl_state {
 	uint8_t			 set_prio[2];
 	uint8_t			 rt;
 	char			 rt_ifname[IFNAMSIZ];
+	sa_family_t		 rt_af;
+	uint8_t			 src_node_flags;
 };
 
 TAILQ_HEAD(pfctl_statelist, pfctl_state);
@@ -393,13 +415,6 @@ struct pfctl_syncookies {
 	uint32_t			halfopen_states;
 };
 
-struct pfctl_threshold {
-	uint32_t		limit;
-	uint32_t		seconds;
-	uint32_t		count;
-	uint32_t		last;
-};
-
 struct pfctl_src_node {
 	struct pf_addr		addr;
 	struct pf_addr		raddr;
@@ -409,11 +424,12 @@ struct pfctl_src_node {
 	uint32_t		states;
 	uint32_t		conn;
 	sa_family_t		af;
-	sa_family_t		naf;
+	sa_family_t		raf;
 	uint8_t			ruletype;
 	uint64_t		creation;
 	uint64_t		expire;
 	struct pfctl_threshold	conn_rate;
+	pf_sn_types_t		type;
 };
 
 #define	PF_DEVICE	"/dev/pf"
@@ -541,6 +557,18 @@ typedef int (*pfctl_get_srcnode_fn)(struct pfctl_src_node*, void *);
 int	pfctl_get_srcnodes(struct pfctl_handle *h, pfctl_get_srcnode_fn fn, void *arg);
 
 int	pfctl_clear_tables(struct pfctl_handle *h, struct pfr_table *filter,
+	    int *ndel, int flags);
+int	pfctl_add_table(struct pfctl_handle *h, struct pfr_table *table,
+	    int *nadd, int flags);
+int	pfctl_del_table(struct pfctl_handle *h, struct pfr_table *table,
+	    int *ndel, int flags);
+
+typedef int (*pfctl_get_tstats_fn)(const struct pfr_tstats *t, void *arg);
+int	pfctl_get_tstats(struct pfctl_handle *h, const struct pfr_table *filter,
+	    pfctl_get_tstats_fn fn, void *arg);
+int	pfctl_clear_tstats(struct pfctl_handle *h, const struct pfr_table *filter,
+	    int *nzero, int flags);
+int	pfctl_clear_addrs(struct pfctl_handle *h, const struct pfr_table *filter,
 	    int *ndel, int flags);
 
 #endif

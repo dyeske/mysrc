@@ -74,49 +74,15 @@ pfr_report_error(struct pfr_table *tbl, struct pfioc_table *io,
 }
 
 int
-pfr_add_tables(struct pfr_table *tbl, int size, int *nadd, int flags)
+pfr_add_table(struct pfr_table *tbl, int *nadd, int flags)
 {
-	struct pfioc_table io;
-
-	if (size < 0 || (size && tbl == NULL)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_buffer = tbl;
-	io.pfrio_esize = sizeof(*tbl);
-	io.pfrio_size = size;
-	if (ioctl(dev, DIOCRADDTABLES, &io)) {
-		pfr_report_error(tbl, &io, "add table");
-		return (-1);
-	}
-	if (nadd != NULL)
-		*nadd = io.pfrio_nadd;
-	return (0);
+	return (pfctl_add_table(pfh, tbl, nadd, flags));
 }
 
 int
-pfr_del_tables(struct pfr_table *tbl, int size, int *ndel, int flags)
+pfr_del_table(struct pfr_table *tbl, int *ndel, int flags)
 {
-	struct pfioc_table io;
-
-	if (size < 0 || (size && tbl == NULL)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_buffer = tbl;
-	io.pfrio_esize = sizeof(*tbl);
-	io.pfrio_size = size;
-	if (ioctl(dev, DIOCRDELTABLES, &io)) {
-		pfr_report_error(tbl, &io, "delete table");
-		return (-1);
-	}
-	if (ndel != NULL)
-		*ndel = io.pfrio_ndel;
-	return (0);
+	return (pfctl_del_table(pfh, tbl, ndel, flags));
 }
 
 int
@@ -145,47 +111,9 @@ pfr_get_tables(struct pfr_table *filter, struct pfr_table *tbl, int *size,
 }
 
 int
-pfr_get_tstats(struct pfr_table *filter, struct pfr_tstats *tbl, int *size,
-	int flags)
-{
-	struct pfioc_table io;
-
-	if (size == NULL || *size < 0 || (*size && tbl == NULL)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	if (filter != NULL)
-		io.pfrio_table = *filter;
-	io.pfrio_buffer = tbl;
-	io.pfrio_esize = sizeof(*tbl);
-	io.pfrio_size = *size;
-	if (ioctl(dev, DIOCRGETTSTATS, &io)) {
-		pfr_report_error(filter, &io, "get tstats for");
-		return (-1);
-	}
-	*size = io.pfrio_size;
-	return (0);
-}
-
-int
 pfr_clr_addrs(struct pfr_table *tbl, int *ndel, int flags)
 {
-	struct pfioc_table io;
-
-	if (tbl == NULL) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_table = *tbl;
-	if (ioctl(dev, DIOCRCLRADDRS, &io))
-		return (-1);
-	if (ndel != NULL)
-		*ndel = io.pfrio_ndel;
-	return (0);
+	return (pfctl_clear_addrs(pfh, tbl, ndel, flags));
 }
 
 int
@@ -288,29 +216,6 @@ pfr_clr_astats(struct pfr_table *tbl, struct pfr_addr *addr, int size,
 	io.pfrio_size = size;
 	if (ioctl(dev, DIOCRCLRASTATS, &io) == -1)
 		return (-1);
-	if (nzero)
-		*nzero = io.pfrio_nzero;
-	return (0);
-}
-
-int
-pfr_clr_tstats(struct pfr_table *tbl, int size, int *nzero, int flags)
-{
-	struct pfioc_table io;
-
-	if (size < 0 || (size && !tbl)) {
-		errno = EINVAL;
-		return (-1);
-	}
-	bzero(&io, sizeof io);
-	io.pfrio_flags = flags;
-	io.pfrio_buffer = tbl;
-	io.pfrio_esize = sizeof(*tbl);
-	io.pfrio_size = size;
-	if (ioctl(dev, DIOCRCLRTSTATS, &io)) {
-		pfr_report_error(tbl, &io, "clear tstats from");
-		return (-1);
-	}
 	if (nzero)
 		*nzero = io.pfrio_nzero;
 	return (0);
@@ -468,25 +373,15 @@ pfr_buf_grow(struct pfr_buffer *b, int minsize)
 	if (!b->pfrb_msize) {
 		if (minsize < 64)
 			minsize = 64;
-		b->pfrb_caddr = calloc(bs, minsize);
-		if (b->pfrb_caddr == NULL)
-			return (-1);
-		b->pfrb_msize = minsize;
-	} else {
-		if (minsize == 0)
-			minsize = b->pfrb_msize * 2;
-		if (minsize < 0 || minsize >= SIZE_T_MAX / bs) {
-			/* msize overflow */
-			errno = ENOMEM;
-			return (-1);
-		}
-		p = realloc(b->pfrb_caddr, minsize * bs);
-		if (p == NULL)
-			return (-1);
-		bzero(p + b->pfrb_msize * bs, (minsize - b->pfrb_msize) * bs);
-		b->pfrb_caddr = p;
-		b->pfrb_msize = minsize;
 	}
+	if (minsize == 0)
+		minsize = b->pfrb_msize * 2;
+	p = reallocarray(b->pfrb_caddr, minsize, bs);
+	if (p == NULL)
+		return (-1);
+	bzero(p + b->pfrb_msize * bs, (minsize - b->pfrb_msize) * bs);
+	b->pfrb_caddr = p;
+	b->pfrb_msize = minsize;
 	return (0);
 }
 
@@ -498,15 +393,14 @@ pfr_buf_clear(struct pfr_buffer *b)
 {
 	if (b == NULL)
 		return;
-	if (b->pfrb_caddr != NULL)
-		free(b->pfrb_caddr);
+	free(b->pfrb_caddr);
 	b->pfrb_caddr = NULL;
 	b->pfrb_size = b->pfrb_msize = 0;
 }
 
 int
 pfr_buf_load(struct pfr_buffer *b, char *file, int nonetwork,
-    int (*append_addr)(struct pfr_buffer *, char *, int))
+    int (*append_addr)(struct pfr_buffer *, char *, int, int), int opts)
 {
 	FILE	*fp;
 	char	 buf[BUF_SIZE];
@@ -522,7 +416,7 @@ pfr_buf_load(struct pfr_buffer *b, char *file, int nonetwork,
 			return (-1);
 	}
 	while ((rv = pfr_next_token(buf, fp)) == 1)
-		if (append_addr(b, buf, nonetwork)) {
+		if (append_addr(b, buf, nonetwork, opts)) {
 			rv = -1;
 			break;
 		}
@@ -566,17 +460,4 @@ pfr_next_token(char buf[BUF_SIZE], FILE *fp)
 	}
 	buf[i] = '\0';
 	return (1);
-}
-
-char *
-pfr_strerror(int errnum)
-{
-	switch (errnum) {
-	case ESRCH:
-		return "Table does not exist";
-	case ENOENT:
-		return "Anchor or Ruleset does not exist";
-	default:
-		return strerror(errnum);
-	}
 }

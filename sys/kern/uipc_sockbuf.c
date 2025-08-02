@@ -75,7 +75,7 @@ static void	sbcompress_ktls_rx(struct sockbuf *sb, struct mbuf *m,
     struct mbuf *n);
 #endif
 static struct mbuf	*sbcut_internal(struct sockbuf *sb, int len);
-static void	sbflush_internal(struct sockbuf *sb);
+static void		sbunreserve_locked(struct socket *so, sb_which which);
 
 /*
  * Our own version of m_clrprotoflags(), that can preserve M_NOTREADY.
@@ -195,14 +195,14 @@ int
 sbready(struct sockbuf *sb, struct mbuf *m0, int count)
 {
 	struct mbuf *m;
-	u_int blocker;
+	bool blocker;
 
 	SOCKBUF_LOCK_ASSERT(sb);
 	KASSERT(sb->sb_fnrdy != NULL, ("%s: sb %p NULL fnrdy", __func__, sb));
 	KASSERT(count > 0, ("%s: invalid count %d", __func__, count));
 
 	m = m0;
-	blocker = (sb->sb_fnrdy == m) ? M_BLOCKED : 0;
+	blocker = (sb->sb_fnrdy == m);
 
 	while (count > 0) {
 		KASSERT(m->m_flags & M_NOTREADY,
@@ -217,8 +217,7 @@ sbready(struct sockbuf *sb, struct mbuf *m0, int count)
 			m->m_epg_nrdy = 0;
 		} else
 			count--;
-
-		m->m_flags &= ~(M_NOTREADY | blocker);
+		m->m_flags &= ~M_NOTREADY;
 		if (blocker)
 			sb->sb_acc += m->m_len;
 		m = m->m_next;
@@ -240,12 +239,8 @@ sbready(struct sockbuf *sb, struct mbuf *m0, int count)
 	}
 
 	/* This one was blocking all the queue. */
-	for (; m && (m->m_flags & M_NOTREADY) == 0; m = m->m_next) {
-		KASSERT(m->m_flags & M_BLOCKED,
-		    ("%s: m %p !M_BLOCKED", __func__, m));
-		m->m_flags &= ~M_BLOCKED;
+	for (; m && (m->m_flags & M_NOTREADY) == 0; m = m->m_next)
 		sb->sb_acc += m->m_len;
-	}
 
 	sb->sb_fnrdy = m;
 	sbready_compress(sb, m0, m);
@@ -269,8 +264,7 @@ sballoc(struct sockbuf *sb, struct mbuf *m)
 			sb->sb_fnrdy = m;
 		else
 			sb->sb_acc += m->m_len;
-	} else
-		m->m_flags |= M_BLOCKED;
+	}
 
 	if (m->m_type != MT_DATA && m->m_type != MT_OOBDATA)
 		sb->sb_ctl += m->m_len;
@@ -287,29 +281,29 @@ sballoc(struct sockbuf *sb, struct mbuf *m)
 void
 sbfree(struct sockbuf *sb, struct mbuf *m)
 {
+	struct mbuf *n;
 
 #if 0	/* XXX: not yet: soclose() call path comes here w/o lock. */
 	SOCKBUF_LOCK_ASSERT(sb);
 #endif
-
 	sb->sb_ccc -= m->m_len;
 
-	if (!(m->m_flags & M_NOTAVAIL))
-		sb->sb_acc -= m->m_len;
-
 	if (m == sb->sb_fnrdy) {
-		struct mbuf *n;
-
 		KASSERT(m->m_flags & M_NOTREADY,
 		    ("%s: m %p !M_NOTREADY", __func__, m));
 
 		n = m->m_next;
 		while (n != NULL && !(n->m_flags & M_NOTREADY)) {
-			n->m_flags &= ~M_BLOCKED;
 			sb->sb_acc += n->m_len;
 			n = n->m_next;
 		}
 		sb->sb_fnrdy = n;
+	} else {
+		/* Assert that mbuf is not behind sb_fnrdy. */
+		for (n = sb->sb_fnrdy; n != NULL; n = n->m_next)
+			KASSERT(n != m, ("%s: sb %p freeing %p behind sb_fnrdy",
+			    __func__, sb, m));
+		sb->sb_acc -= m->m_len;
 	}
 
 	if (m->m_type != MT_DATA && m->m_type != MT_OOBDATA)
@@ -619,7 +613,7 @@ soreserve(struct socket *so, u_long sndcc, u_long rcvcc)
 	SOCK_SENDBUF_UNLOCK(so);
 	return (0);
 bad2:
-	sbrelease_locked(so, SO_SND);
+	sbunreserve_locked(so, SO_SND);
 bad:
 	SOCK_RECVBUF_UNLOCK(so);
 	SOCK_SENDBUF_UNLOCK(so);
@@ -682,6 +676,18 @@ sbreserve_locked(struct socket *so, sb_which which, u_long cc,
     struct thread *td)
 {
 	return (sbreserve_locked_limit(so, which, cc, sb_max, td));
+}
+
+static void
+sbunreserve_locked(struct socket *so, sb_which which)
+{
+	struct sockbuf *sb = sobuf(so, which);
+
+	SOCK_BUF_LOCK_ASSERT(so, which);
+
+	(void)chgsbsize(so->so_cred->cr_uidinfo, &sb->sb_hiwat, 0,
+	    RLIM_INFINITY);
+	sb->sb_mbmax = 0;
 }
 
 int
@@ -767,6 +773,7 @@ sbsetopt(struct socket *so, struct sockopt *sopt)
 		 * high-water.
 		 */
 		*lowat = (cc > *hiwat) ? *hiwat : cc;
+		*flags &= ~SB_AUTOLOWAT;
 		break;
 	}
 
@@ -779,24 +786,15 @@ sbsetopt(struct socket *so, struct sockopt *sopt)
 /*
  * Free mbufs held by a socket, and reserved mbuf space.
  */
-static void
-sbrelease_internal(struct socket *so, sb_which which)
-{
-	struct sockbuf *sb = sobuf(so, which);
-
-	sbflush_internal(sb);
-	(void)chgsbsize(so->so_cred->cr_uidinfo, &sb->sb_hiwat, 0,
-	    RLIM_INFINITY);
-	sb->sb_mbmax = 0;
-}
-
 void
 sbrelease_locked(struct socket *so, sb_which which)
 {
+	struct sockbuf *sb = sobuf(so, which);
 
 	SOCK_BUF_LOCK_ASSERT(so, which);
 
-	sbrelease_internal(so, which);
+	sbflush_locked(sb);
+	sbunreserve_locked(so, which);
 }
 
 void
@@ -818,7 +816,7 @@ sbdestroy(struct socket *so, sb_which which)
 		ktls_free(sb->sb_tls_info);
 	sb->sb_tls_info = NULL;
 #endif
-	sbrelease_internal(so, which);
+	sbrelease_locked(so, which);
 }
 
 /*
@@ -1125,13 +1123,7 @@ sbcheck(struct sockbuf *sb, const char *file, int line)
 			}
 			fnrdy = m;
 		}
-		if (fnrdy) {
-			if (!(m->m_flags & M_NOTAVAIL)) {
-				printf("sb %p: fnrdy %p, m %p is avail\n",
-				    sb, sb->sb_fnrdy, m);
-				goto fail;
-			}
-		} else
+		if (fnrdy == NULL)
 			acc += m->m_len;
 		ccc += m->m_len;
 		mbcnt += MSIZE;
@@ -1530,9 +1522,11 @@ sbcompress_ktls_rx(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 /*
  * Free all mbufs in a sockbuf.  Check that all resources are reclaimed.
  */
-static void
-sbflush_internal(struct sockbuf *sb)
+void
+sbflush_locked(struct sockbuf *sb)
 {
+
+	SOCKBUF_LOCK_ASSERT(sb);
 
 	while (sb->sb_mbcnt || sb->sb_tlsdcc) {
 		/*
@@ -1546,14 +1540,6 @@ sbflush_internal(struct sockbuf *sb)
 	KASSERT(sb->sb_ccc == 0 && sb->sb_mb == 0 && sb->sb_mbcnt == 0,
 	    ("%s: ccc %u mb %p mbcnt %u", __func__,
 	    sb->sb_ccc, (void *)sb->sb_mb, sb->sb_mbcnt));
-}
-
-void
-sbflush_locked(struct sockbuf *sb)
-{
-
-	SOCKBUF_LOCK_ASSERT(sb);
-	sbflush_internal(sb);
 }
 
 void
@@ -1604,8 +1590,8 @@ sbcut_internal(struct sockbuf *sb, int len)
 			next = m->m_nextpkt;
 		}
 		if (m->m_len > len) {
-			KASSERT(!(m->m_flags & M_NOTAVAIL),
-			    ("%s: m %p M_NOTAVAIL", __func__, m));
+			KASSERT(!(m->m_flags & M_NOTREADY),
+			    ("%s: m %p M_NOTREADY", __func__, m));
 			m->m_len -= len;
 			m->m_data += len;
 			sb->sb_ccc -= len;

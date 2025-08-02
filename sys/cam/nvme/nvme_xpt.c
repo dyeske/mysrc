@@ -38,6 +38,7 @@
 #include <sys/conf.h>
 #include <sys/fcntl.h>
 #include <sys/sbuf.h>
+#include <sys/stdarg.h>
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -57,7 +58,6 @@
 #include <cam/scsi/scsi_all.h>
 #include <cam/scsi/scsi_message.h>
 #include <cam/nvme/nvme_all.h>
-#include <machine/stdarg.h>	/* for xpt_print below */
 
 struct nvme_quirk_entry {
 	u_int quirks;
@@ -204,16 +204,16 @@ nvme_probe_register(struct cam_periph *periph, void *arg)
 
 	request_ccb = (union ccb *)arg;
 	if (request_ccb == NULL) {
-		printf("nvme_probe_register: no probe CCB, "
-		       "can't register device\n");
+		printf(
+		    "nvme_probe_register: no probe CCB, can't register device\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 
 	softc = (nvme_probe_softc *)malloc(sizeof(*softc), M_CAMXPT, M_ZERO | M_NOWAIT);
 
 	if (softc == NULL) {
-		printf("nvme_probe_register: Unable to probe new device. "
-		       "Unable to allocate softc\n");
+		printf(
+	"nvme_probe_register: Unable to probe new device. Unable to allocate softc\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 	TAILQ_INIT(&softc->request_ccbs);
@@ -579,8 +579,8 @@ nvme_scan_lun(struct cam_periph *periph, struct cam_path *path,
 					  request_ccb);
 
 		if (status != CAM_REQ_CMP) {
-			xpt_print(path, "xpt_scan_lun: cam_alloc_periph "
-			    "returned an error, can't continue probe\n");
+			xpt_print(path,
+	"xpt_scan_lun: cam_alloc_periph returned an error, can't continue probe\n");
 			request_ccb->ccb_h.status = status;
 			xpt_done(request_ccb);
 		}
@@ -833,14 +833,13 @@ nvme_proto_denounce_sbuf(struct cam_ed *device, struct sbuf *sb)
 static void
 nvme_proto_debug_out(union ccb *ccb)
 {
-	char cdb_str[(sizeof(struct nvme_command) * 3) + 1];
+	char command_str[128];
 
 	if (ccb->ccb_h.func_code != XPT_NVME_IO &&
 	    ccb->ccb_h.func_code != XPT_NVME_ADMIN)
 		return;
 
 	CAM_DEBUG(ccb->ccb_h.path,
-	    CAM_DEBUG_CDB,("%s. NCB: %s\n", nvme_op_string(&ccb->nvmeio.cmd,
-		ccb->ccb_h.func_code == XPT_NVME_ADMIN),
-		nvme_cmd_string(&ccb->nvmeio.cmd, cdb_str, sizeof(cdb_str))));
+	    CAM_DEBUG_CDB,("%s\n", nvme_command_string(&ccb->nvmeio,
+		command_str, sizeof(command_str))));
 }

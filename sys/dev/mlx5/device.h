@@ -32,8 +32,8 @@
 
 #define	FW_INIT_TIMEOUT_MILI		2000
 #define	FW_INIT_WAIT_MS			2
-#define	FW_PRE_INIT_TIMEOUT_MILI	120000
-#define	FW_INIT_WARN_MESSAGE_INTERVAL	20000
+#define	FW_PRE_INIT_TIMEOUT_MILI	5000
+#define	FW_INIT_WARN_MESSAGE_INTERVAL	2000
 
 #if defined(__LITTLE_ENDIAN)
 #define MLX5_SET_HOST_ENDIANNESS	0
@@ -727,6 +727,7 @@ struct mlx5_cqe64 {
 	u8		signature;
 	u8		op_own;
 };
+_Static_assert(sizeof(struct mlx5_cqe64) == 0x40, "CQE layout broken");
 
 #define	MLX5_CQE_TSTMP_PTP	(1ULL << 63)
 

@@ -49,8 +49,10 @@
 #include <sys/rman.h>
 #include <sys/sbuf.h>
 #include <sys/smp.h>
+#include <sys/stdarg.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
+#include <sys/taskqueue.h>
 #include <sys/bus.h>
 #include <sys/cpuset.h>
 #ifdef INTRNG
@@ -60,7 +62,6 @@
 #include <net/vnet.h>
 
 #include <machine/cpu.h>
-#include <machine/stdarg.h>
 
 #include <vm/uma.h>
 #include <vm/vm.h>
@@ -119,6 +120,8 @@ struct device_prop_elm {
 	device_prop_dtr_t dtr;
 	LIST_ENTRY(device_prop_elm) link;
 };
+
+TASKQUEUE_DEFINE_THREAD(bus);
 
 static void device_destroy_props(device_t dev);
 
@@ -572,9 +575,7 @@ devclass_find_internal(const char *classname, const char *parentname,
 	if (create && !dc) {
 		PDEBUG(("creating %s", classname));
 		dc = malloc(sizeof(struct devclass) + strlen(classname) + 1,
-		    M_BUS, M_NOWAIT | M_ZERO);
-		if (!dc)
-			return (NULL);
+		    M_BUS, M_WAITOK | M_ZERO);
 		dc->parent = NULL;
 		dc->name = (char*) (dc + 1);
 		strcpy(dc->name, classname);
@@ -708,9 +709,7 @@ devclass_add_driver(devclass_t dc, driver_t *driver, int pass, devclass_t *dcp)
 	if (pass <= BUS_PASS_ROOT)
 		return (EINVAL);
 
-	dl = malloc(sizeof *dl, M_BUS, M_NOWAIT|M_ZERO);
-	if (!dl)
-		return (ENOMEM);
+	dl = malloc(sizeof *dl, M_BUS, M_WAITOK|M_ZERO);
 
 	/*
 	 * Compile the driver's methods. Also increase the reference count
@@ -1303,9 +1302,7 @@ devclass_add_device(devclass_t dc, device_t dev)
 	buflen = snprintf(NULL, 0, "%s%d$", dc->name, INT_MAX);
 	if (buflen < 0)
 		return (ENOMEM);
-	dev->nameunit = malloc(buflen, M_BUS, M_NOWAIT|M_ZERO);
-	if (!dev->nameunit)
-		return (ENOMEM);
+	dev->nameunit = malloc(buflen, M_BUS, M_WAITOK|M_ZERO);
 
 	if ((error = devclass_alloc_unit(dc, dev, &dev->unit)) != 0) {
 		free(dev->nameunit, M_BUS);
@@ -1382,10 +1379,7 @@ make_device(device_t parent, const char *name, int unit)
 		dc = NULL;
 	}
 
-	dev = malloc(sizeof(*dev), M_BUS, M_NOWAIT|M_ZERO);
-	if (!dev)
-		return (NULL);
-
+	dev = malloc(sizeof(*dev), M_BUS, M_WAITOK|M_ZERO);
 	dev->parent = parent;
 	TAILQ_INIT(&dev->children);
 	kobj_init((kobj_t) dev, &null_class);
@@ -2113,7 +2107,7 @@ device_set_desc_copy(device_t dev, const char *desc)
 {
 	char *buf;
 
-	buf = strdup_flags(desc, M_BUS, M_NOWAIT);
+	buf = strdup_flags(desc, M_BUS, M_WAITOK);
 	device_set_desc_internal(dev, buf, true);
 }
 
@@ -2473,13 +2467,7 @@ device_set_driver(device_t dev, driver_t *driver)
 			else
 				policy = DOMAINSET_RR();
 			dev->softc = malloc_domainset(driver->size, M_BUS_SC,
-			    policy, M_NOWAIT | M_ZERO);
-			if (!dev->softc) {
-				kobj_delete((kobj_t) dev, NULL);
-				kobj_init((kobj_t) dev, &null_class);
-				dev->driver = NULL;
-				return (ENOMEM);
-			}
+			    policy, M_WAITOK | M_ZERO);
 		}
 	} else {
 		kobj_init((kobj_t) dev, &null_class);
@@ -2932,9 +2920,7 @@ resource_list_add(struct resource_list *rl, int type, int rid,
 	rle = resource_list_find(rl, type, rid);
 	if (!rle) {
 		rle = malloc(sizeof(struct resource_list_entry), M_BUS,
-		    M_NOWAIT);
-		if (!rle)
-			panic("resource_list_add: can't record entry");
+		    M_WAITOK);
 		STAILQ_INSERT_TAIL(rl, rle, link);
 		rle->type = type;
 		rle->rid = rid;
@@ -3864,17 +3850,6 @@ bus_generic_get_property(device_t dev, device_t child, const char *propname,
 		    propname, propvalue, size, type));
 
 	return (-1);
-}
-
-/**
- * @brief Stub function for implementing BUS_GET_RESOURCE_LIST().
- *
- * @returns NULL
- */
-struct resource_list *
-bus_generic_get_resource_list(device_t dev, device_t child)
-{
-	return (NULL);
 }
 
 /**
@@ -6283,8 +6258,10 @@ SYSCTL_INT(_debug, OID_AUTO, obsolete_panic, CTLFLAG_RWTUN, &obsolete_panic, 0,
     "2 = if deprecated)");
 
 static void
-gone_panic(int major, int running, const char *msg)
+gone_panic(int major, int running, const char *msg, ...)
 {
+	va_list ap;
+
 	switch (obsolete_panic)
 	{
 	case 0:
@@ -6294,32 +6271,36 @@ gone_panic(int major, int running, const char *msg)
 			return;
 		/* FALLTHROUGH */
 	default:
-		panic("%s", msg);
+		va_start(ap, msg);
+		vpanic(msg, ap);
 	}
 }
 
 void
-_gone_in(int major, const char *msg)
+_gone_in(int major, const char *msg, ...)
 {
-	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg);
-	if (P_OSREL_MAJOR(__FreeBSD_version) >= major)
-		printf("Obsolete code will be removed soon: %s\n", msg);
-	else
-		printf("Deprecated code (to be removed in FreeBSD %d): %s\n",
-		    major, msg);
+	va_list ap;
+
+	va_start(ap, msg);
+	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg, ap);
+	vprintf(msg, ap);
+	va_end(ap);
+	if (P_OSREL_MAJOR(__FreeBSD_version) < major)
+		printf("To be removed in FreeBSD %d\n", major);
 }
 
 void
-_gone_in_dev(device_t dev, int major, const char *msg)
+_gone_in_dev(device_t dev, int major, const char *msg, ...)
 {
-	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg);
-	if (P_OSREL_MAJOR(__FreeBSD_version) >= major)
+	va_list ap;
+
+	va_start(ap, msg);
+	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg, ap);
+	device_printf(dev, msg, ap);
+	va_end(ap);
+	if (P_OSREL_MAJOR(__FreeBSD_version) < major)
 		device_printf(dev,
-		    "Obsolete code will be removed soon: %s\n", msg);
-	else
-		device_printf(dev,
-		    "Deprecated code (to be removed in FreeBSD %d): %s\n",
-		    major, msg);
+		    "to be removed in FreeBSD %d\n", major);
 }
 
 #ifdef DDB

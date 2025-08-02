@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -294,8 +295,8 @@ vdev_get_mg(vdev_t *vd, metaslab_class_t *mc)
 }
 
 void
-vdev_default_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
-    range_seg64_t *physical_rs, range_seg64_t *remain_rs)
+vdev_default_xlate(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
+    zfs_range_seg64_t *physical_rs, zfs_range_seg64_t *remain_rs)
 {
 	(void) vd, (void) remain_rs;
 
@@ -320,6 +321,19 @@ vdev_derive_alloc_bias(const char *bias)
 		alloc_bias = VDEV_BIAS_DEDUP;
 
 	return (alloc_bias);
+}
+
+uint64_t
+vdev_default_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
+{
+	ASSERT0(asize % (1ULL << vd->vdev_top->vdev_ashift));
+	uint64_t csize, psize = asize;
+	for (int c = 0; c < vd->vdev_children; c++) {
+		csize = vdev_asize_to_psize_txg(vd->vdev_child[c], asize, txg);
+		psize = MIN(psize, csize);
+	}
+
+	return (psize);
 }
 
 /*
@@ -539,6 +553,7 @@ vdev_add_child(vdev_t *pvd, vdev_t *cvd)
 
 	pvd->vdev_child = newchild;
 	pvd->vdev_child[id] = cvd;
+	pvd->vdev_nonrot &= cvd->vdev_nonrot;
 
 	cvd->vdev_top = (pvd->vdev_top ? pvd->vdev_top: cvd);
 	ASSERT(cvd->vdev_top->vdev_parent->vdev_parent == NULL);
@@ -677,8 +692,8 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 
 	rw_init(&vd->vdev_indirect_rwlock, NULL, RW_DEFAULT, NULL);
 	mutex_init(&vd->vdev_obsolete_lock, NULL, MUTEX_DEFAULT, NULL);
-	vd->vdev_obsolete_segments = range_tree_create(NULL, RANGE_SEG64, NULL,
-	    0, 0);
+	vd->vdev_obsolete_segments = zfs_range_tree_create(NULL,
+	    ZFS_RANGE_SEG64, NULL, 0, 0);
 
 	/*
 	 * Initialize rate limit structs for events.  We rate limit ZIO delay
@@ -732,8 +747,8 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	cv_init(&vd->vdev_rebuild_cv, NULL, CV_DEFAULT, NULL);
 
 	for (int t = 0; t < DTL_TYPES; t++) {
-		vd->vdev_dtl[t] = range_tree_create(NULL, RANGE_SEG64, NULL, 0,
-		    0);
+		vd->vdev_dtl[t] = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
+		    NULL, 0, 0);
 	}
 
 	txg_list_create(&vd->vdev_ms_list, spa,
@@ -1155,8 +1170,8 @@ vdev_free(vdev_t *vd)
 	mutex_enter(&vd->vdev_dtl_lock);
 	space_map_close(vd->vdev_dtl_sm);
 	for (int t = 0; t < DTL_TYPES; t++) {
-		range_tree_vacate(vd->vdev_dtl[t], NULL, NULL);
-		range_tree_destroy(vd->vdev_dtl[t]);
+		zfs_range_tree_vacate(vd->vdev_dtl[t], NULL, NULL);
+		zfs_range_tree_destroy(vd->vdev_dtl[t]);
 	}
 	mutex_exit(&vd->vdev_dtl_lock);
 
@@ -1173,7 +1188,7 @@ vdev_free(vdev_t *vd)
 		space_map_close(vd->vdev_obsolete_sm);
 		vd->vdev_obsolete_sm = NULL;
 	}
-	range_tree_destroy(vd->vdev_obsolete_segments);
+	zfs_range_tree_destroy(vd->vdev_obsolete_segments);
 	rw_destroy(&vd->vdev_indirect_rwlock);
 	mutex_destroy(&vd->vdev_obsolete_lock);
 
@@ -1283,7 +1298,7 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 	tvd->vdev_indirect_config = svd->vdev_indirect_config;
 	tvd->vdev_indirect_mapping = svd->vdev_indirect_mapping;
 	tvd->vdev_indirect_births = svd->vdev_indirect_births;
-	range_tree_swap(&svd->vdev_obsolete_segments,
+	zfs_range_tree_swap(&svd->vdev_obsolete_segments,
 	    &tvd->vdev_obsolete_segments);
 	tvd->vdev_obsolete_sm = svd->vdev_obsolete_sm;
 	svd->vdev_indirect_config.vic_mapping_object = 0;
@@ -1360,6 +1375,7 @@ vdev_add_parent(vdev_t *cvd, vdev_ops_t *ops)
 	mvd->vdev_physical_ashift = cvd->vdev_physical_ashift;
 	mvd->vdev_state = cvd->vdev_state;
 	mvd->vdev_crtxg = cvd->vdev_crtxg;
+	mvd->vdev_nonrot = cvd->vdev_nonrot;
 
 	vdev_remove_child(pvd, cvd);
 	vdev_add_child(pvd, mvd);
@@ -1489,12 +1505,11 @@ vdev_metaslab_group_create(vdev_t *vd)
 			mc = spa_normal_class(spa);
 		}
 
-		vd->vdev_mg = metaslab_group_create(mc, vd,
-		    spa->spa_alloc_count);
+		vd->vdev_mg = metaslab_group_create(mc, vd);
 
 		if (!vd->vdev_islog) {
 			vd->vdev_log_mg = metaslab_group_create(
-			    spa_embedded_log_class(spa), vd, 1);
+			    spa_embedded_log_class(spa), vd);
 		}
 
 		/*
@@ -1512,6 +1527,25 @@ vdev_metaslab_group_create(vdev_t *vd)
 			uint64_t min_alloc = vdev_get_min_alloc(vd);
 			vdev_spa_set_alloc(spa, min_alloc);
 		}
+	}
+}
+
+void
+vdev_update_nonallocating_space(vdev_t *vd, boolean_t add)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	if (vd->vdev_mg->mg_class != spa_normal_class(spa))
+		return;
+
+	uint64_t raw_space = metaslab_group_get_space(vd->vdev_mg);
+	uint64_t dspace = spa_deflate(spa) ?
+	    vdev_deflated_space(vd, raw_space) : raw_space;
+	if (add) {
+		spa->spa_nonallocating_dspace += dspace;
+	} else {
+		ASSERT3U(spa->spa_nonallocating_dspace, >=, dspace);
+		spa->spa_nonallocating_dspace -= dspace;
 	}
 }
 
@@ -1546,6 +1580,18 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	vd->vdev_ms = mspp;
 	vd->vdev_ms_count = newc;
+
+	/*
+	 * Weighting algorithms can depend on the number of metaslabs in the
+	 * vdev. In order to ensure that all weights are correct at all times,
+	 * we need to recalculate here.
+	 */
+	for (uint64_t m = 0; m < oldc; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+		mutex_enter(&msp->ms_lock);
+		metaslab_recalculate_weight_and_sort(msp);
+		mutex_exit(&msp->ms_lock);
+	}
 
 	for (uint64_t m = oldc; m < newc; m++) {
 		uint64_t object = 0;
@@ -1626,8 +1672,7 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 	 */
 	if (vd->vdev_noalloc) {
 		/* track non-allocating vdev space */
-		spa->spa_nonallocating_dspace += spa_deflate(spa) ?
-		    vd->vdev_stat.vs_dspace : vd->vdev_stat.vs_space;
+		vdev_update_nonallocating_space(vd, B_TRUE);
 	} else if (!expanding) {
 		metaslab_group_activate(vd->vdev_mg);
 		if (vd->vdev_log_mg != NULL)
@@ -1677,7 +1722,7 @@ vdev_metaslab_fini(vdev_t *vd)
 		vd->vdev_ms = NULL;
 		vd->vdev_ms_count = 0;
 
-		for (int i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++) {
+		for (int i = 0; i < ZFS_RANGE_TREE_HISTOGRAM_SIZE; i++) {
 			ASSERT0(mg->mg_histogram[i]);
 			if (vd->vdev_log_mg != NULL)
 				ASSERT0(vd->vdev_log_mg->mg_histogram[i]);
@@ -1741,8 +1786,11 @@ vdev_probe_done(zio_t *zio)
 			 * change the state in a spa_async_request. Probes that
 			 * were initiated from a vdev_open can change the state
 			 * as part of the open call.
+			 * Skip fault injection if this vdev is already removed
+			 * or a removal is pending.
 			 */
-			if (vps->vps_zio_done_probe) {
+			if (vps->vps_zio_done_probe &&
+			    !vd->vdev_remove_wanted && !vd->vdev_removed) {
 				vd->vdev_fault_wanted = B_TRUE;
 				spa_async_request(spa, SPA_ASYNC_FAULT_VDEV);
 			}
@@ -1920,14 +1968,21 @@ vdev_open_children_impl(vdev_t *vd, vdev_open_children_func_t *open_func)
 			VERIFY(taskq_dispatch(tq, vdev_open_child,
 			    cvd, TQ_SLEEP) != TASKQID_INVALID);
 		}
+	}
 
+	if (tq != NULL)
+		taskq_wait(tq);
+	for (int c = 0; c < children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+
+		if (open_func(cvd) == B_FALSE ||
+		    cvd->vdev_state <= VDEV_STATE_FAULTED)
+			continue;
 		vd->vdev_nonrot &= cvd->vdev_nonrot;
 	}
 
-	if (tq != NULL) {
-		taskq_wait(tq);
+	if (tq != NULL)
 		taskq_destroy(tq);
-	}
 }
 
 /*
@@ -2969,22 +3024,22 @@ vdev_dirty_leaves(vdev_t *vd, int flags, uint64_t txg)
 void
 vdev_dtl_dirty(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	zfs_range_tree_t *rt = vd->vdev_dtl[t];
 
 	ASSERT(t < DTL_TYPES);
 	ASSERT(vd != vd->vdev_spa->spa_root_vdev);
 	ASSERT(spa_writeable(vd->vdev_spa));
 
 	mutex_enter(&vd->vdev_dtl_lock);
-	if (!range_tree_contains(rt, txg, size))
-		range_tree_add(rt, txg, size);
+	if (!zfs_range_tree_contains(rt, txg, size))
+		zfs_range_tree_add(rt, txg, size);
 	mutex_exit(&vd->vdev_dtl_lock);
 }
 
 boolean_t
 vdev_dtl_contains(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	zfs_range_tree_t *rt = vd->vdev_dtl[t];
 	boolean_t dirty = B_FALSE;
 
 	ASSERT(t < DTL_TYPES);
@@ -2999,8 +3054,8 @@ vdev_dtl_contains(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 	 * always checksummed.
 	 */
 	mutex_enter(&vd->vdev_dtl_lock);
-	if (!range_tree_is_empty(rt))
-		dirty = range_tree_contains(rt, txg, size);
+	if (!zfs_range_tree_is_empty(rt))
+		dirty = zfs_range_tree_contains(rt, txg, size);
 	mutex_exit(&vd->vdev_dtl_lock);
 
 	return (dirty);
@@ -3009,11 +3064,11 @@ vdev_dtl_contains(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 boolean_t
 vdev_dtl_empty(vdev_t *vd, vdev_dtl_type_t t)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	zfs_range_tree_t *rt = vd->vdev_dtl[t];
 	boolean_t empty;
 
 	mutex_enter(&vd->vdev_dtl_lock);
-	empty = range_tree_is_empty(rt);
+	empty = zfs_range_tree_is_empty(rt);
 	mutex_exit(&vd->vdev_dtl_lock);
 
 	return (empty);
@@ -3060,10 +3115,10 @@ static uint64_t
 vdev_dtl_min(vdev_t *vd)
 {
 	ASSERT(MUTEX_HELD(&vd->vdev_dtl_lock));
-	ASSERT3U(range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
+	ASSERT3U(zfs_range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
 	ASSERT0(vd->vdev_children);
 
-	return (range_tree_min(vd->vdev_dtl[DTL_MISSING]) - 1);
+	return (zfs_range_tree_min(vd->vdev_dtl[DTL_MISSING]) - 1);
 }
 
 /*
@@ -3073,10 +3128,10 @@ static uint64_t
 vdev_dtl_max(vdev_t *vd)
 {
 	ASSERT(MUTEX_HELD(&vd->vdev_dtl_lock));
-	ASSERT3U(range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
+	ASSERT3U(zfs_range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
 	ASSERT0(vd->vdev_children);
 
-	return (range_tree_max(vd->vdev_dtl[DTL_MISSING]));
+	return (zfs_range_tree_max(vd->vdev_dtl[DTL_MISSING]));
 }
 
 /*
@@ -3098,7 +3153,7 @@ vdev_dtl_should_excise(vdev_t *vd, boolean_t rebuild_done)
 	if (vd->vdev_resilver_deferred)
 		return (B_FALSE);
 
-	if (range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]))
+	if (zfs_range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]))
 		return (B_TRUE);
 
 	if (rebuild_done) {
@@ -3187,7 +3242,7 @@ vdev_dtl_reassess_impl(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 		}
 
 		if (scrub_txg != 0 &&
-		    !range_tree_is_empty(vd->vdev_dtl[DTL_MISSING])) {
+		    !zfs_range_tree_is_empty(vd->vdev_dtl[DTL_MISSING])) {
 			wasempty = B_FALSE;
 			zfs_dbgmsg("guid:%llu txg:%llu scrub:%llu started:%d "
 			    "dtl:%llu/%llu errors:%llu",
@@ -3243,7 +3298,8 @@ vdev_dtl_reassess_impl(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 			    vd->vdev_dtl[DTL_MISSING], 1);
 			space_reftree_destroy(&reftree);
 
-			if (!range_tree_is_empty(vd->vdev_dtl[DTL_MISSING])) {
+			if (!zfs_range_tree_is_empty(
+			    vd->vdev_dtl[DTL_MISSING])) {
 				zfs_dbgmsg("update DTL_MISSING:%llu/%llu",
 				    (u_longlong_t)vdev_dtl_min(vd),
 				    (u_longlong_t)vdev_dtl_max(vd));
@@ -3251,12 +3307,13 @@ vdev_dtl_reassess_impl(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 				zfs_dbgmsg("DTL_MISSING is now empty");
 			}
 		}
-		range_tree_vacate(vd->vdev_dtl[DTL_PARTIAL], NULL, NULL);
-		range_tree_walk(vd->vdev_dtl[DTL_MISSING],
-		    range_tree_add, vd->vdev_dtl[DTL_PARTIAL]);
+		zfs_range_tree_vacate(vd->vdev_dtl[DTL_PARTIAL], NULL, NULL);
+		zfs_range_tree_walk(vd->vdev_dtl[DTL_MISSING],
+		    zfs_range_tree_add, vd->vdev_dtl[DTL_PARTIAL]);
 		if (scrub_done)
-			range_tree_vacate(vd->vdev_dtl[DTL_SCRUB], NULL, NULL);
-		range_tree_vacate(vd->vdev_dtl[DTL_OUTAGE], NULL, NULL);
+			zfs_range_tree_vacate(vd->vdev_dtl[DTL_SCRUB], NULL,
+			    NULL);
+		zfs_range_tree_vacate(vd->vdev_dtl[DTL_OUTAGE], NULL, NULL);
 
 		/*
 		 * For the faulting case, treat members of a replacing vdev
@@ -3267,10 +3324,10 @@ vdev_dtl_reassess_impl(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 		if (!vdev_readable(vd) ||
 		    (faulting && vd->vdev_parent != NULL &&
 		    vd->vdev_parent->vdev_ops == &vdev_replacing_ops)) {
-			range_tree_add(vd->vdev_dtl[DTL_OUTAGE], 0, -1ULL);
+			zfs_range_tree_add(vd->vdev_dtl[DTL_OUTAGE], 0, -1ULL);
 		} else {
-			range_tree_walk(vd->vdev_dtl[DTL_MISSING],
-			    range_tree_add, vd->vdev_dtl[DTL_OUTAGE]);
+			zfs_range_tree_walk(vd->vdev_dtl[DTL_MISSING],
+			    zfs_range_tree_add, vd->vdev_dtl[DTL_OUTAGE]);
 		}
 
 		/*
@@ -3279,8 +3336,8 @@ vdev_dtl_reassess_impl(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 		 * the top level so that we persist the change.
 		 */
 		if (txg != 0 &&
-		    range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]) &&
-		    range_tree_is_empty(vd->vdev_dtl[DTL_OUTAGE])) {
+		    zfs_range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]) &&
+		    zfs_range_tree_is_empty(vd->vdev_dtl[DTL_OUTAGE])) {
 			if (vd->vdev_rebuild_txg != 0) {
 				vd->vdev_rebuild_txg = 0;
 				vdev_config_dirty(vd->vdev_top);
@@ -3374,7 +3431,7 @@ vdev_dtl_load(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
 	objset_t *mos = spa->spa_meta_objset;
-	range_tree_t *rt;
+	zfs_range_tree_t *rt;
 	int error = 0;
 
 	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_dtl_object != 0) {
@@ -3392,17 +3449,17 @@ vdev_dtl_load(vdev_t *vd)
 			return (error);
 		ASSERT(vd->vdev_dtl_sm != NULL);
 
-		rt = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
+		rt = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64, NULL, 0, 0);
 		error = space_map_load(vd->vdev_dtl_sm, rt, SM_ALLOC);
 		if (error == 0) {
 			mutex_enter(&vd->vdev_dtl_lock);
-			range_tree_walk(rt, range_tree_add,
+			zfs_range_tree_walk(rt, zfs_range_tree_add,
 			    vd->vdev_dtl[DTL_MISSING]);
 			mutex_exit(&vd->vdev_dtl_lock);
 		}
 
-		range_tree_vacate(rt, NULL, NULL);
-		range_tree_destroy(rt);
+		zfs_range_tree_vacate(rt, NULL, NULL);
+		zfs_range_tree_destroy(rt);
 
 		return (error);
 	}
@@ -3496,9 +3553,9 @@ static void
 vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
-	range_tree_t *rt = vd->vdev_dtl[DTL_MISSING];
+	zfs_range_tree_t *rt = vd->vdev_dtl[DTL_MISSING];
 	objset_t *mos = spa->spa_meta_objset;
-	range_tree_t *rtsync;
+	zfs_range_tree_t *rtsync;
 	dmu_tx_t *tx;
 	uint64_t object = space_map_object(vd->vdev_dtl_sm);
 
@@ -3540,17 +3597,17 @@ vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 		ASSERT(vd->vdev_dtl_sm != NULL);
 	}
 
-	rtsync = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
+	rtsync = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64, NULL, 0, 0);
 
 	mutex_enter(&vd->vdev_dtl_lock);
-	range_tree_walk(rt, range_tree_add, rtsync);
+	zfs_range_tree_walk(rt, zfs_range_tree_add, rtsync);
 	mutex_exit(&vd->vdev_dtl_lock);
 
 	space_map_truncate(vd->vdev_dtl_sm, zfs_vdev_dtl_sm_blksz, tx);
 	space_map_write(vd->vdev_dtl_sm, rtsync, SM_ALLOC, SM_NO_VDEVID, tx);
-	range_tree_vacate(rtsync, NULL, NULL);
+	zfs_range_tree_vacate(rtsync, NULL, NULL);
 
-	range_tree_destroy(rtsync);
+	zfs_range_tree_destroy(rtsync);
 
 	/*
 	 * If the object for the space map has changed then dirty
@@ -3620,7 +3677,7 @@ vdev_resilver_needed(vdev_t *vd, uint64_t *minp, uint64_t *maxp)
 
 	if (vd->vdev_children == 0) {
 		mutex_enter(&vd->vdev_dtl_lock);
-		if (!range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]) &&
+		if (!zfs_range_tree_is_empty(vd->vdev_dtl[DTL_MISSING]) &&
 		    vdev_writeable(vd)) {
 
 			thismin = vdev_dtl_min(vd);
@@ -4064,7 +4121,7 @@ vdev_sync(vdev_t *vd, uint64_t txg)
 
 	ASSERT3U(txg, ==, spa->spa_syncing_txg);
 	dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
-	if (range_tree_space(vd->vdev_obsolete_segments) > 0) {
+	if (zfs_range_tree_space(vd->vdev_obsolete_segments) > 0) {
 		ASSERT(vd->vdev_removing ||
 		    vd->vdev_ops == &vdev_indirect_ops);
 
@@ -4112,17 +4169,22 @@ vdev_sync(vdev_t *vd, uint64_t txg)
 	(void) txg_list_add(&spa->spa_vdev_txg_list, vd, TXG_CLEAN(txg));
 	dmu_tx_commit(tx);
 }
+uint64_t
+vdev_asize_to_psize_txg(vdev_t *vd, uint64_t asize, uint64_t txg)
+{
+	return (vd->vdev_ops->vdev_op_asize_to_psize(vd, asize, txg));
+}
 
 /*
  * Return the amount of space that should be (or was) allocated for the given
  * psize (compressed block size) in the given TXG. Note that for expanded
  * RAIDZ vdevs, the size allocated for older BP's may be larger. See
- * vdev_raidz_asize().
+ * vdev_raidz_psize_to_asize().
  */
 uint64_t
 vdev_psize_to_asize_txg(vdev_t *vd, uint64_t psize, uint64_t txg)
 {
-	return (vd->vdev_ops->vdev_op_asize(vd, psize, txg));
+	return (vd->vdev_ops->vdev_op_psize_to_asize(vd, psize, txg));
 }
 
 uint64_t
@@ -4268,7 +4330,7 @@ vdev_remove_wanted(spa_t *spa, uint64_t guid)
 		return (spa_vdev_state_exit(spa, NULL, SET_ERROR(EEXIST)));
 
 	vd->vdev_remove_wanted = B_TRUE;
-	spa_async_request(spa, SPA_ASYNC_REMOVE);
+	spa_async_request(spa, SPA_ASYNC_REMOVE_BY_USER);
 
 	return (spa_vdev_state_exit(spa, vd, 0));
 }
@@ -5687,7 +5749,7 @@ vdev_clear_resilver_deferred(vdev_t *vd, dmu_tx_t *tx)
 }
 
 boolean_t
-vdev_xlate_is_empty(range_seg64_t *rs)
+vdev_xlate_is_empty(zfs_range_seg64_t *rs)
 {
 	return (rs->rs_start == rs->rs_end);
 }
@@ -5701,8 +5763,8 @@ vdev_xlate_is_empty(range_seg64_t *rs)
  * specific translation function to do the real conversion.
  */
 void
-vdev_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
-    range_seg64_t *physical_rs, range_seg64_t *remain_rs)
+vdev_xlate(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
+    zfs_range_seg64_t *physical_rs, zfs_range_seg64_t *remain_rs)
 {
 	/*
 	 * Walk up the vdev tree
@@ -5734,7 +5796,7 @@ vdev_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
 	 * range into its physical and any remaining components by calling
 	 * the vdev specific translate function.
 	 */
-	range_seg64_t intermediate = { 0 };
+	zfs_range_seg64_t intermediate = { 0 };
 	pvd->vdev_ops->vdev_op_xlate(vd, physical_rs, &intermediate, remain_rs);
 
 	physical_rs->rs_start = intermediate.rs_start;
@@ -5742,12 +5804,12 @@ vdev_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
 }
 
 void
-vdev_xlate_walk(vdev_t *vd, const range_seg64_t *logical_rs,
+vdev_xlate_walk(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
     vdev_xlate_func_t *func, void *arg)
 {
-	range_seg64_t iter_rs = *logical_rs;
-	range_seg64_t physical_rs;
-	range_seg64_t remain_rs;
+	zfs_range_seg64_t iter_rs = *logical_rs;
+	zfs_range_seg64_t physical_rs;
+	zfs_range_seg64_t remain_rs;
 
 	while (!vdev_xlate_is_empty(&iter_rs)) {
 
@@ -6580,3 +6642,7 @@ ZFS_MODULE_PARAM_CALL(zfs_vdev, zfs_vdev_, max_auto_ashift,
 	param_set_max_auto_ashift, param_get_uint, ZMOD_RW,
 	"Maximum ashift used when optimizing for logical -> physical sector "
 	"size on new top-level vdevs");
+
+ZFS_MODULE_PARAM_CALL(zfs_vdev, zfs_vdev_, raidz_impl,
+		param_set_raidz_impl, param_get_raidz_impl, ZMOD_RW,
+		"RAIDZ implementation");

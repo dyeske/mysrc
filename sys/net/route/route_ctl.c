@@ -109,10 +109,11 @@ SYSCTL_DECL(_net_route);
 #define	V_rib_route_multipath	VNET(rib_route_multipath)
 #ifdef ROUTE_MPATH
 #define _MP_FLAGS	CTLFLAG_RW
+VNET_DEFINE(u_int, rib_route_multipath) = 1;
 #else
 #define _MP_FLAGS	CTLFLAG_RD
+VNET_DEFINE(u_int, rib_route_multipath) = 0;
 #endif
-VNET_DEFINE(u_int, rib_route_multipath) = 1;
 SYSCTL_UINT(_net_route, OID_AUTO, multipath, _MP_FLAGS | CTLFLAG_VNET,
     &VNET_NAME(rib_route_multipath), 0, "Enable route multipath");
 #undef _MP_FLAGS
@@ -672,12 +673,11 @@ rib_copy_route(struct rtentry *rt, const struct route_nhop_data *rnd_src,
 	if (error != 0) {
 		IF_DEBUG_LEVEL(LOG_DEBUG2) {
 			char buf[NHOP_PRINT_BUFSIZE];
-			rt_print_buf(rt_new, buf, sizeof(buf));
+			rt_print_buf(rt, buf, sizeof(buf));
 			FIB_RH_LOG(LOG_DEBUG, rh_dst,
 			    "Unable to add route %s: error %d", buf, error);
 		}
 		nhop_free(nh);
-		rt_free_immediate(rt_new);
 	}
 	return (error);
 }
@@ -820,7 +820,7 @@ add_route_flags(struct rib_head *rnh, struct rtentry *rt, struct route_nhop_data
 
 	/* Now either append or replace */
 	if (op_flags & RTM_F_REPLACE) {
-		if (nhop_get_prio(rnd_orig.rnd_nhop) > nhop_get_prio(rnd_add->rnd_nhop)) {
+		if (nhop_get_prio(rnd_orig.rnd_nhop) == NH_PRIORITY_HIGH) {
 			/* Old path is "better" (e.g. has PINNED flag set) */
 			RIB_WUNLOCK(rnh);
 			error = EEXIST;

@@ -35,7 +35,7 @@ v4_head()
 	atf_set require.user root
 
 	# We need scapy to be installed for out test scripts to work
-	atf_set require.progs scapy
+	atf_set require.progs python3 scapy
 }
 
 v4_body()
@@ -94,16 +94,12 @@ v6_head()
 {
 	atf_set descr 'Basic IPv6 forwarding test'
 	atf_set require.user root
-	atf_set require.progs scapy
+	atf_set require.progs python3 scapy
 }
 
 v6_body()
 {
 	pft_init
-
-	if [ "$(atf_config_get ci false)" = "true" ]; then
-		atf_skip "https://bugs.freebsd.org/260460"
-	fi
 
 	epair_send=$(vnet_mkepair)
 	epair_recv=$(vnet_mkepair)

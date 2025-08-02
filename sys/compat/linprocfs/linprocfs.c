@@ -446,9 +446,6 @@ linprocfs_docpuinfo(PFS_FILL_ARGS)
 }
 #endif /* __i386__ || __amd64__ */
 
-static const char *path_slash_sys = "/sys";
-static const char *fstype_sysfs = "sysfs";
-
 static int
 _mtab_helper(const struct pfs_node *pn, const struct statfs *sp,
     const char **mntfrom, const char **mntto, const char **fstype)
@@ -476,8 +473,7 @@ _mtab_helper(const struct pfs_node *pn, const struct statfs *sp,
 	}
 
 	if (strcmp(*fstype, "linsysfs") == 0) {
-		*mntfrom = path_slash_sys;
-		*fstype = fstype_sysfs;
+		*mntfrom = *fstype = "sysfs";
 	} else {
 		/* For Linux msdosfs is called vfat */
 		if (strcmp(*fstype, "msdosfs") == 0)
@@ -1915,7 +1911,7 @@ linprocfs_doproclimits(PFS_FILL_ARGS)
 			    "kern.sigqueue.max_pending_per_proc",
 			    &res, &size, 0, 0, 0, 0);
 			if (error != 0)
-				goto out;
+				continue;
 			rl.rlim_cur = res;
 			rl.rlim_max = res;
 			break;
@@ -1923,7 +1919,7 @@ linprocfs_doproclimits(PFS_FILL_ARGS)
 			error = kernel_sysctlbyname(td,
 			    "kern.ipc.msgmnb", &res, &size, 0, 0, 0, 0);
 			if (error != 0)
-				goto out;
+				continue;
 			rl.rlim_cur = res;
 			rl.rlim_max = res;
 			break;
@@ -1945,9 +1941,9 @@ linprocfs_doproclimits(PFS_FILL_ARGS)
 			    li->desc, (unsigned long long)rl.rlim_cur,
 			    (unsigned long long)rl.rlim_max, li->unit);
 	}
-out:
+
 	lim_free(limp);
-	return (error);
+	return (0);
 }
 
 /*

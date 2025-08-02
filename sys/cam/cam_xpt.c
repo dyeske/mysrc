@@ -44,6 +44,7 @@
 #include <sys/proc.h>
 #include <sys/sbuf.h>
 #include <sys/smp.h>
+#include <sys/stdarg.h>
 #include <sys/taskqueue.h>
 
 #include <sys/lock.h>
@@ -68,7 +69,6 @@
 #include <cam/scsi/scsi_message.h>
 #include <cam/scsi/scsi_pass.h>
 
-#include <machine/stdarg.h>	/* for xpt_print below */
 
 /* Wild guess based on not wanting to grow the stack too much */
 #define XPT_PRINT_MAXLEN	512
@@ -723,10 +723,9 @@ xptdoioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flag, struct thread *
 			 * kernel.
 			 */
 			if (base_periph_found) {
-				printf("xptioctl: pass driver is not in the "
-				       "kernel\n");
-				printf("xptioctl: put \"device pass\" in "
-				       "your kernel config file\n");
+				printf(
+		"xptioctl: pass driver is not in the kernel\n"
+		"xptioctl: put \"device pass\" in your kernel config file\n");
 			}
 		}
 		xpt_unlock_buses();
@@ -923,8 +922,9 @@ xpt_init(void *dummy)
 		return (ENOMEM);
 
 	if ((error = xpt_bus_register(xpt_sim, NULL, 0)) != CAM_SUCCESS) {
-		printf("xpt_init: xpt_bus_register failed with errno %d,"
-		       " failing attach\n", error);
+		printf(
+		    "xpt_init: xpt_bus_register failed with errno %d, failing attach\n",
+		    error);
 		return (EINVAL);
 	}
 
@@ -936,8 +936,9 @@ xpt_init(void *dummy)
 	if ((status = xpt_create_path(&path, NULL, CAM_XPT_PATH_ID,
 				      CAM_TARGET_WILDCARD,
 				      CAM_LUN_WILDCARD)) != CAM_REQ_CMP) {
-		printf("xpt_init: xpt_create_path failed with status %#x,"
-		       " failing attach\n", status);
+		printf(
+	"xpt_init: xpt_create_path failed with status %#x, failing attach\n",
+		    status);
 		return (EINVAL);
 	}
 	xpt_path_lock(path);
@@ -962,8 +963,7 @@ xpt_init(void *dummy)
 		}
 	}
 	if (cam_num_doneqs < 1) {
-		printf("xpt_init: Cannot init completion queues "
-		       "- failing attach\n");
+		printf("xpt_init: Cannot init completion queues - failing attach\n");
 		return (ENOMEM);
 	}
 
@@ -971,8 +971,7 @@ xpt_init(void *dummy)
 	STAILQ_INIT(&cam_async.cam_doneq);
 	if (kproc_kthread_add(xpt_async_td, &cam_async,
 		&cam_proc, NULL, 0, 0, "cam", "async") != 0) {
-		printf("xpt_init: Cannot init async thread "
-		       "- failing attach\n");
+		printf("xpt_init: Cannot init async thread - failing attach\n");
 		return (ENOMEM);
 	}
 
@@ -2472,15 +2471,12 @@ xptsetasyncfunc(struct cam_ed *device, void *arg)
 	if ((device->flags & CAM_DEV_UNCONFIGURED) != 0)
 		return (1);
 
-	memset(&cgd, 0, sizeof(cgd));
 	xpt_compile_path(&path,
 			 NULL,
 			 device->target->bus->path_id,
 			 device->target->target_id,
 			 device->lun_id);
-	xpt_setup_ccb(&cgd.ccb_h, &path, CAM_PRIORITY_NORMAL);
-	cgd.ccb_h.func_code = XPT_GDEV_TYPE;
-	xpt_action((union ccb *)&cgd);
+	xpt_gdev_type(&cgd, &path);
 	csa->callback(csa->callback_arg,
 			    AC_FOUND_DEVICE,
 			    &path, &cgd);
@@ -2518,6 +2514,15 @@ xpt_action(union ccb *start_ccb)
 	CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_TRACE,
 	    ("xpt_action: func %#x %s\n", start_ccb->ccb_h.func_code,
 		xpt_action_name(start_ccb->ccb_h.func_code)));
+
+	/*
+	 * Either it isn't queued, or it has a real priority. There still too
+	 * many places that reuse CCBs with a real priority to do immediate
+	 * queries to do the other side of this assert.
+	 */
+	KASSERT((start_ccb->ccb_h.func_code & XPT_FC_QUEUED) == 0 ||
+	    start_ccb->ccb_h.pinfo.priority != CAM_PRIORITY_NONE,
+	    ("%s: queued ccb and CAM_PRIORITY_NONE illegal.", __func__));
 
 	start_ccb->ccb_h.status = CAM_REQ_INPROG;
 	(*(start_ccb->ccb_h.path->bus->xport->ops->action))(start_ccb);
@@ -4060,12 +4065,11 @@ xptpathid(const char *sim_name, int sim_unit, int sim_bus)
 			pathid = dunit;
 			break;
 		} else {
-			printf("Ambiguous scbus configuration for %s%d "
-			       "bus %d, cannot wire down.  The kernel "
-			       "config entry for scbus%d should "
-			       "specify a controller bus.\n"
-			       "Scbus will be assigned dynamically.\n",
-			       sim_name, sim_unit, sim_bus, dunit);
+			printf(
+"Ambiguous scbus configuration for %s%d bus %d, cannot wire down.  The kernel\n"
+"config entry for scbus%d should specify a controller bus.\n"
+"Scbus will be assigned dynamically.\n",
+			    sim_name, sim_unit, sim_bus, dunit);
 			break;
 		}
 	}
@@ -5036,9 +5040,9 @@ xpt_config(void *arg)
 		if (xpt_create_path(&cam_dpath, NULL,
 				    CAM_DEBUG_BUS, CAM_DEBUG_TARGET,
 				    CAM_DEBUG_LUN) != CAM_REQ_CMP) {
-			printf("xpt_config: xpt_create_path() failed for debug"
-			       " target %d:%d:%d, debugging disabled\n",
-			       CAM_DEBUG_BUS, CAM_DEBUG_TARGET, CAM_DEBUG_LUN);
+			printf(
+"xpt_config: xpt_create_path() failed for debug target %d:%d:%d, debugging disabled\n",
+			    CAM_DEBUG_BUS, CAM_DEBUG_TARGET, CAM_DEBUG_LUN);
 			cam_dflags = CAM_DEBUG_NONE;
 		}
 	} else

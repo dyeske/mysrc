@@ -9,7 +9,7 @@ CONTRIB=${SRCTOP}/contrib/bsnmp
 CONFS=	snmpd.config
 CONFSMODE=	600
 PROG=	bsnmpd
-SRCS=	main.c action.c config.c export.c trap.c trans_udp.c trans_lsock.c
+SRCS=	main.c action.c config.c export.c trap.c trans_lsock.c
 SRCS+=	trans_inet.c oid.h tree.c tree.h
 XSYM=	snmpMIB begemotSnmpdModuleTable begemotSnmpd begemotTrapSinkTable \
 	sysUpTime snmpTrapOID coldStart authenticationFailure \
@@ -131,7 +131,7 @@ CFLAGS+= -I${CONTRIB}/lib -I${CONTRIB}/snmpd -I. -DUSE_LIBBEGEMOT
 CFLAGS+= -DHAVE_STDINT_H -DHAVE_INTTYPES_H -DHAVE_ERR_H -DHAVE_STRLCPY
 LIBADD=	begemot bsnmp
 
-LDFLAGS= -Wl,-export-dynamic
+LDFLAGS+= -Wl,-export-dynamic
 
 .if ${MK_OPENSSL} != "no"
 CFLAGS+= -DHAVE_LIBCRYPTO

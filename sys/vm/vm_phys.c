@@ -67,7 +67,6 @@
 #include <vm/vm_extern.h>
 #include <vm/vm_param.h>
 #include <vm/vm_kern.h>
-#include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_phys.h>
 #include <vm/vm_pagequeue.h>
@@ -394,13 +393,23 @@ static void
 vm_freelist_add(struct vm_freelist *fl, vm_page_t m, int order, int pool,
     int tail)
 {
+	/*
+	 * The paging queues and the free page lists utilize the same field,
+	 * plinks.q, within the vm_page structure.  When a physical page is
+	 * freed, it is lazily removed from the paging queues to reduce the
+	 * cost of removal through batching.  Here, we must ensure that any
+	 * deferred dequeue on the physical page has completed before using
+	 * its plinks.q field.
+	 */
+	if (__predict_false(vm_page_astate_load(m).queue != PQ_NONE))
+		vm_page_dequeue(m);
 
 	m->order = order;
 	m->pool = pool;
 	if (tail)
-		TAILQ_INSERT_TAIL(&fl[order].pl, m, listq);
+		TAILQ_INSERT_TAIL(&fl[order].pl, m, plinks.q);
 	else
-		TAILQ_INSERT_HEAD(&fl[order].pl, m, listq);
+		TAILQ_INSERT_HEAD(&fl[order].pl, m, plinks.q);
 	fl[order].lcnt++;
 }
 
@@ -408,7 +417,7 @@ static void
 vm_freelist_rem(struct vm_freelist *fl, vm_page_t m, int order)
 {
 
-	TAILQ_REMOVE(&fl[order].pl, m, listq);
+	TAILQ_REMOVE(&fl[order].pl, m, plinks.q);
 	fl[order].lcnt--;
 	m->order = VM_NFREEORDER;
 }
@@ -421,18 +430,26 @@ _vm_phys_create_seg(vm_paddr_t start, vm_paddr_t end, int domain)
 {
 	struct vm_phys_seg *seg;
 
-	KASSERT(vm_phys_nsegs < VM_PHYSSEG_MAX,
-	    ("vm_phys_create_seg: increase VM_PHYSSEG_MAX"));
-	KASSERT(domain >= 0 && domain < vm_ndomains,
-	    ("vm_phys_create_seg: invalid domain provided"));
+	if (!(0 <= domain && domain < vm_ndomains))
+		panic("%s: Invalid domain %d ('vm_ndomains' is %d)",
+		    __func__, domain, vm_ndomains);
+	if (vm_phys_nsegs >= VM_PHYSSEG_MAX)
+		panic("Not enough storage for physical segments, "
+		    "increase VM_PHYSSEG_MAX");
+
 	seg = &vm_phys_segs[vm_phys_nsegs++];
-	while (seg > vm_phys_segs && (seg - 1)->start >= end) {
+	while (seg > vm_phys_segs && seg[-1].start >= end) {
 		*seg = *(seg - 1);
 		seg--;
 	}
 	seg->start = start;
 	seg->end = end;
 	seg->domain = domain;
+	if (seg != vm_phys_segs && seg[-1].end > start)
+		panic("Overlapping physical segments: Current [%#jx,%#jx) "
+		    "at index %zu, previous [%#jx,%#jx)",
+		    (uintmax_t)start, (uintmax_t)end, seg - vm_phys_segs,
+		    (uintmax_t)seg[-1].start, (uintmax_t)seg[-1].end);
 }
 
 static void
@@ -476,10 +493,18 @@ vm_phys_add_seg(vm_paddr_t start, vm_paddr_t end)
 {
 	vm_paddr_t paddr;
 
-	KASSERT((start & PAGE_MASK) == 0,
-	    ("vm_phys_define_seg: start is not page aligned"));
-	KASSERT((end & PAGE_MASK) == 0,
-	    ("vm_phys_define_seg: end is not page aligned"));
+	if ((start & PAGE_MASK) != 0)
+		panic("%s: start (%jx) is not page aligned", __func__,
+		    (uintmax_t)start);
+	if ((end & PAGE_MASK) != 0)
+		panic("%s: end (%jx) is not page aligned", __func__,
+		    (uintmax_t)end);
+	if (start > end)
+		panic("%s: start (%jx) > end (%jx)!", __func__,
+		    (uintmax_t)start, (uintmax_t)end);
+
+	if (start == end)
+		return;
 
 	/*
 	 * Split the physical memory segment if it spans two or more free
@@ -1567,7 +1592,7 @@ vm_phys_find_freelist_contig(struct vm_freelist *fl, u_long npages,
 	 * check if there are enough free blocks starting at a properly aligned
 	 * block.  Thus, no block is checked for free-ness more than twice.
 	 */
-	TAILQ_FOREACH(m, &fl[max_order].pl, listq) {
+	TAILQ_FOREACH(m, &fl[max_order].pl, plinks.q) {
 		/*
 		 * Skip m unless it is first in a sequence of free max page
 		 * blocks >= low in its segment.
@@ -1640,7 +1665,7 @@ vm_phys_find_queues_contig(
 	for (oind = order; oind < VM_NFREEORDER; oind++) {
 		for (pind = vm_default_freepool; pind < VM_NFREEPOOL; pind++) {
 			fl = (*queues)[pind];
-			TAILQ_FOREACH(m_ret, &fl[oind].pl, listq) {
+			TAILQ_FOREACH(m_ret, &fl[oind].pl, plinks.q) {
 				/*
 				 * Determine if the address range starting at pa
 				 * is within the given range, satisfies the
@@ -1766,12 +1791,10 @@ vm_phys_avail_count(void)
 {
 	int i;
 
-	for (i = 0; phys_avail[i + 1]; i += 2)
-		continue;
-	if (i > PHYS_AVAIL_ENTRIES)
-		panic("Improperly terminated phys_avail %d entries", i);
-
-	return (i);
+	for (i = 0; i < PHYS_AVAIL_COUNT; i += 2)
+		if (phys_avail[i] == 0 && phys_avail[i + 1] == 0)
+			return (i);
+	panic("Improperly terminated phys_avail[]");
 }
 
 /*
@@ -1780,15 +1803,17 @@ vm_phys_avail_count(void)
 static void
 vm_phys_avail_check(int i)
 {
+	if (i % 2 != 0)
+		panic("Chunk start index %d is not even.", i);
 	if (phys_avail[i] & PAGE_MASK)
 		panic("Unaligned phys_avail[%d]: %#jx", i,
 		    (intmax_t)phys_avail[i]);
-	if (phys_avail[i+1] & PAGE_MASK)
+	if (phys_avail[i + 1] & PAGE_MASK)
 		panic("Unaligned phys_avail[%d + 1]: %#jx", i,
-		    (intmax_t)phys_avail[i]);
+		    (intmax_t)phys_avail[i + 1]);
 	if (phys_avail[i + 1] < phys_avail[i])
-		panic("phys_avail[%d] start %#jx < end %#jx", i,
-		    (intmax_t)phys_avail[i], (intmax_t)phys_avail[i+1]);
+		panic("phys_avail[%d]: start %#jx > end %#jx", i,
+		    (intmax_t)phys_avail[i], (intmax_t)phys_avail[i + 1]);
 }
 
 /*
@@ -1838,7 +1863,13 @@ vm_phys_avail_size(int i)
 }
 
 /*
- * Split an entry at the address 'pa'.  Return zero on success or errno.
+ * Split a chunk in phys_avail[] at the address 'pa'.
+ *
+ * 'pa' must be within a chunk (slots i and i + 1) or one of its boundaries.
+ * Returns zero on actual split, in which case the two new chunks occupy slots
+ * i to i + 3, else EJUSTRETURN if 'pa' was one of the boundaries (and no split
+ * actually occurred) else ENOSPC if there are not enough slots in phys_avail[]
+ * to represent the additional chunk caused by the split.
  */
 static int
 vm_phys_avail_split(vm_paddr_t pa, int i)
@@ -1846,8 +1877,12 @@ vm_phys_avail_split(vm_paddr_t pa, int i)
 	int cnt;
 
 	vm_phys_avail_check(i);
-	if (pa <= phys_avail[i] || pa >= phys_avail[i + 1])
-		panic("vm_phys_avail_split: invalid address");
+	if (pa < phys_avail[i] || pa > phys_avail[i + 1])
+		panic("%s: Address %#jx not in range at slot %d [%#jx;%#jx].",
+		    __func__, (uintmax_t)pa, i,
+		    (uintmax_t)phys_avail[i], (uintmax_t)phys_avail[i + 1]);
+	if (pa == phys_avail[i] || pa == phys_avail[i + 1])
+		return (EJUSTRETURN);
 	cnt = vm_phys_avail_count();
 	if (cnt >= PHYS_AVAIL_ENTRIES)
 		return (ENOSPC);
@@ -1991,6 +2026,9 @@ vm_phys_early_startup(void)
 	struct vm_phys_seg *seg;
 	int i;
 
+	if (phys_avail[1] == 0)
+		panic("phys_avail[] is empty");
+
 	for (i = 0; phys_avail[i + 1] != 0; i += 2) {
 		phys_avail[i] = round_page(phys_avail[i]);
 		phys_avail[i + 1] = trunc_page(phys_avail[i + 1]);
@@ -2009,12 +2047,10 @@ vm_phys_early_startup(void)
 
 		for (i = 0; mem_affinity[i].end != 0; i++) {
 			idx = vm_phys_avail_find(mem_affinity[i].start);
-			if (idx != -1 &&
-			    phys_avail[idx] != mem_affinity[i].start)
+			if (idx != -1)
 				vm_phys_avail_split(mem_affinity[i].start, idx);
 			idx = vm_phys_avail_find(mem_affinity[i].end);
-			if (idx != -1 &&
-			    phys_avail[idx] != mem_affinity[i].end)
+			if (idx != -1)
 				vm_phys_avail_split(mem_affinity[i].end, idx);
 		}
 	}

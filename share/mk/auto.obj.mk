@@ -1,14 +1,16 @@
-# $Id: auto.obj.mk,v 1.12 2015/12/16 01:57:06 sjg Exp $
+# SPDX-License-Identifier: BSD-2-Clause
 #
-#	@(#) Copyright (c) 2004, Simon J. Gerraty
+# $Id: auto.obj.mk,v 1.20 2025/05/17 15:29:55 sjg Exp $
+#
+#	@(#) Copyright (c) 2004-2025, Simon J. Gerraty
 #
 #	This file is provided in the hope that it will
 #	be of use.  There is absolutely NO WARRANTY.
 #	Permission to copy, redistribute or otherwise
-#	use this file is hereby granted provided that 
+#	use this file is hereby granted provided that
 #	the above copyright notice and this notice are
-#	left intact. 
-#      
+#	left intact.
+#
 #	Please send copies of changes and bug-fixes to:
 #	sjg@crufty.net
 #
@@ -16,7 +18,7 @@
 ECHO_TRACE ?= echo
 
 .ifndef Mkdirs
-# A race condition in some versions of mkdir, means that it can bail 
+# A race condition in some versions of mkdir, means that it can bail
 # if another process made a dir that mkdir expected to.
 # We repeat the mkdir -p a number of times to try and work around this.
 # We stop looping as soon as the dir exists.
@@ -48,12 +50,17 @@ __objdir?= ${.CURDIR}
 __objdir?= ${MAKEOBJDIRPREFIX}${.CURDIR}
 .endif
 __objdir?= ${MAKEOBJDIR:Uobj}
-__objdir:= ${__objdir}
+# relative dirs can cause trouble below
+# keep it simple and convert to absolute path now if needed
+.if ${__objdir:M/*} == ""
+# avoid ugly ${.CURDIR}/./obj etc.
+__objdir:= ${.CURDIR}/${__objdir:S,^./,,}
+.endif
 .if ${.OBJDIR:tA} != ${__objdir:tA}
 # We need to chdir, make the directory if needed
 .if !exists(${__objdir}/) && \
 	(${.TARGETS} == "" || ${.TARGETS:Nclean*:N*clean:Ndestroy*} != "")
-# This will actually make it... 
+# This will actually make it...
 __objdir_made != echo ${__objdir}/; umask ${OBJDIR_UMASK:U002}; \
         ${ECHO_TRACE} "[Creating objdir ${__objdir}...]" >&2; \
         ${Mkdirs}; Mkdirs ${__objdir}
@@ -63,10 +70,8 @@ __objdir_made != echo ${__objdir}/; umask ${OBJDIR_UMASK:U002}; \
 .if ${.OBJDIR:tA} != ${__objdir:tA}
 # we did not get what we want - do we care?
 .if ${__objdir_made:Uno:M${__objdir}/*} != ""
-# watch out for __objdir being relative path
-.if !(${__objdir:M/*} == "" && ${.OBJDIR:tA} == ${${.CURDIR}/${__objdir}:L:tA})
+# we attempted to make ${__objdir} and failed
 .error could not use ${__objdir}: .OBJDIR=${.OBJDIR}
-.endif
 .endif
 # apparently we can live with it
 # make sure we know what we have

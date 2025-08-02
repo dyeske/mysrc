@@ -38,6 +38,7 @@
 #ifndef _KERNEL
 /* stuff that *used* to be included by user.h, or is now needed */
 #include <sys/errno.h>
+#include <sys/event.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/ucred.h>
@@ -85,7 +86,7 @@
  */
 #define	KI_NSPARE_INT	2
 #define	KI_NSPARE_LONG	12
-#define	KI_NSPARE_PTR	5
+#define	KI_NSPARE_PTR	4
 
 #ifndef _KERNEL
 #ifndef KINFO_PROC_SIZE
@@ -211,6 +212,7 @@ struct kinfo_proc {
 	 * That way the spare room from both arrays will remain contiguous.
 	 */
 	struct	pwddesc *ki_pd;	/* pointer to process paths info */
+	void	*ki_uerrmsg;		/* address of the ext err msg place */
 	void	*ki_spareptrs[KI_NSPARE_PTR];	/* spare room for growth */
 	long	ki_sparelongs[KI_NSPARE_LONG];	/* spare room for growth */
 	long	ki_sflag;		/* PS_* flags */
@@ -263,6 +265,7 @@ struct user {
 #define	KF_TYPE_DEV	12
 #define	KF_TYPE_EVENTFD	13
 #define	KF_TYPE_TIMERFD	14
+#define	KF_TYPE_INOTIFY	15
 #define	KF_TYPE_UNKNOWN	255
 
 #define	KF_VTYPE_VNON	0
@@ -454,6 +457,10 @@ struct kinfo_file {
 				int32_t		kf_kqueue_count;
 				int32_t		kf_kqueue_state;
 			} kf_kqueue;
+			struct {
+				uint64_t	kf_inotify_npending;
+				uint64_t	kf_inotify_nbpending;
+			} kf_inotify;
 		} kf_un;
 	};
 	uint16_t	kf_status;		/* Status flags. */
@@ -665,6 +672,35 @@ struct kinfo_vm_layout {
 	uintptr_t	kvm_spare[12];
 };
 
+#define	KNOTE_STATUS_ACTIVE		0x00000001
+#define	KNOTE_STATUS_QUEUED		0x00000002
+#define	KNOTE_STATUS_DISABLED		0x00000004
+#define	KNOTE_STATUS_DETACHED		0x00000008
+#define	KNOTE_STATUS_KQUEUE		0x00000010
+
+#define	KNOTE_EXTDATA_NONE		0
+#define	KNOTE_EXTDATA_VNODE		1
+#define	KNOTE_EXTDATA_PIPE		2
+
+struct kinfo_knote {
+	int		knt_kq_fd;
+	struct kevent	knt_event;
+	int		knt_status;
+	int		knt_extdata;
+	uint64_t	knt_spare0[4];
+	union {
+		struct {
+			int		knt_vnode_type;
+			uint64_t	knt_vnode_fsid;
+			uint64_t	knt_vnode_fileid;
+			char		knt_vnode_fullpath[PATH_MAX];
+		} knt_vnode;
+		struct {
+			ino_t		knt_pipe_ino;
+		} knt_pipe;
+	};
+};
+
 #ifdef _KERNEL
 /* Flags for kern_proc_out function. */
 #define KERN_PROC_NOTHREADS	0x1
@@ -692,6 +728,8 @@ int	kern_proc_cwd_out(struct proc *p, struct sbuf *sb, ssize_t maxlen);
 int	kern_proc_out(struct proc *p, struct sbuf *sb, int flags);
 int	kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen,
 	int flags);
+int	kern_proc_kqueues_out(struct proc *p, struct sbuf *s, size_t maxlen,
+	bool compat32);
 
 int	vntype_to_kinfo(int vtype);
 void	pack_kinfo(struct kinfo_file *kif);

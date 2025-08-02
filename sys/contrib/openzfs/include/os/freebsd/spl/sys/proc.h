@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -44,7 +45,9 @@
 #ifdef _KERNEL
 #define	CPU		curcpu
 #define	minclsyspri	PRIBIO
-#define	defclsyspri minclsyspri
+#define	defclsyspri	minclsyspri
+/* Write issue taskq priority. */
+#define	wtqclsyspri	((PVM + PRIBIO) / 2)
 #define	maxclsyspri	PVM
 #define	max_ncpus	(mp_maxid + 1)
 #define	boot_max_ncpus	(mp_maxid + 1)

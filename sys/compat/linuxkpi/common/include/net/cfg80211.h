@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2020-2024 The FreeBSD Foundation
+ * Copyright (c) 2020-2025 The FreeBSD Foundation
  * Copyright (c) 2021-2022 Bjoern A. Zeeb
  *
  * This software was developed by Björn Zeeb under sponsorship from
@@ -44,6 +44,8 @@
 #include <linux/workqueue.h>
 #include <net/regulatory.h>
 
+#include <net80211/ieee80211.h>
+
 /* linux_80211.c */
 extern int linuxkpi_debug_80211;
 #ifndef	D80211_TODO
@@ -80,6 +82,9 @@ enum cfg80211_rate_info_flags {
 	RATE_INFO_FLAGS_EHT_MCS		= BIT(7),
 	/* Max 8 bits as used in struct rate_info. */
 };
+
+#define	CFG80211_RATE_INFO_FLAGS_BITS					\
+    "\20\1MCS\2VHT_MCS\3SGI\5HE_MCS\10EHT_MCS"
 
 extern const uint8_t rfc1042_header[6];
 extern const uint8_t bridge_tunnel_header[6];
@@ -164,7 +169,7 @@ enum rate_info_bw {
 
 struct rate_info {
 	uint8_t					flags;			/* enum cfg80211_rate_info_flags */
-	uint8_t					bw;
+	uint8_t					bw;			/* enum rate_info_bw */
 	uint16_t				legacy;
 	uint8_t					mcs;
 	uint8_t					nss;
@@ -175,11 +180,10 @@ struct rate_info {
 };
 
 struct ieee80211_rate {
-	/* TODO FIXME */
-	uint32_t		bitrate;
-	uint32_t		hw_value;
-	uint32_t		hw_value_short;
-	uint32_t		flags;
+	uint32_t		flags;					/* enum ieee80211_rate_flags */
+	uint16_t		bitrate;
+	uint16_t		hw_value;
+	uint16_t		hw_value_short;
 };
 
 struct ieee80211_sta_ht_cap {
@@ -198,7 +202,7 @@ struct ieee80211_sta_ht_cap {
 
 #define	IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ		(IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ << IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK_S)
 #define	IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ	(IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160_80P80MHZ << IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK_S)
-#define	IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK	0x0000000c	/* IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK */
+#define	IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK			IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK
 
 #define	IEEE80211_VHT_CAP_RXLDPC		0x00000010	/* IEEE80211_VHTCAP_RXLDPC */
 
@@ -236,7 +240,8 @@ struct ieee80211_sta_ht_cap {
 #define	IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK	\
 	(7 << IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT)	/* IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK */
 
-#define	IEEE80211_VHT_CAP_EXT_NSS_BW_MASK	0xc0000000
+#define	IEEE80211_VHT_CAP_EXT_NSS_BW_MASK	IEEE80211_VHTCAP_EXT_NSS_BW
+#define	IEEE80211_VHT_CAP_EXT_NSS_BW_SHIFT	IEEE80211_VHTCAP_EXT_NSS_BW_S
 
 struct ieee80211_sta_vht_cap {
 		/* TODO FIXME */
@@ -546,18 +551,39 @@ struct station_del_parameters {
 };
 
 struct station_info {
-	/* TODO FIXME */
-	int     assoc_req_ies_len, connected_time;
-	int	generation, inactive_time, rx_bytes, rx_dropped_misc, rx_packets, signal, tx_bytes, tx_packets;
-	int     filled, rx_beacon, rx_beacon_signal_avg, signal_avg;
-	int	rx_duration, tx_duration, tx_failed, tx_retries;
-	int	ack_signal, avg_ack_signal;
+	uint64_t				filled;		/* enum nl80211_sta_info */
+	uint32_t				connected_time;
+	uint32_t				inactive_time;
+
+	uint64_t				rx_bytes;
+	uint32_t				rx_packets;
+	uint32_t				rx_dropped_misc;
+
+	uint64_t				rx_duration;
+	uint32_t				rx_beacon;
+	uint8_t					rx_beacon_signal_avg;
+
+	int8_t					signal;
+	int8_t					signal_avg;
+	int8_t					ack_signal;
+	int8_t					avg_ack_signal;
+
+	/* gap */
+	int					generation;
+
+	uint64_t				tx_bytes;
+	uint32_t				tx_packets;
+	uint32_t				tx_failed;
+	uint64_t				tx_duration;
+	uint32_t				tx_retries;
 
 	int					chains;
 	uint8_t					chain_signal[IEEE80211_MAX_CHAINS];
 	uint8_t					chain_signal_avg[IEEE80211_MAX_CHAINS];
 
 	uint8_t					*assoc_req_ies;
+	size_t					assoc_req_ies_len;
+
 	struct rate_info			rxrate;
 	struct rate_info			txrate;
 	struct cfg80211_ibss_params		bss_param;
@@ -615,174 +641,6 @@ struct linuxkpi_ieee80211_regdomain {
 	int					n_reg_rules;
 	struct ieee80211_reg_rule		reg_rules[];
 };
-
-/* XXX-BZ this are insensible values probably ... */
-#define	IEEE80211_HE_MAC_CAP0_HTC_HE			0x1
-#define	IEEE80211_HE_MAC_CAP0_TWT_REQ			0x2
-#define	IEEE80211_HE_MAC_CAP0_TWT_RES			0x4
-
-#define	IEEE80211_HE_MAC_CAP1_LINK_ADAPTATION		0x1
-#define	IEEE80211_HE_MAC_CAP1_MULTI_TID_AGG_RX_QOS_8	0x2
-#define	IEEE80211_HE_MAC_CAP1_TF_MAC_PAD_DUR_16US	0x4
-#define	IEEE80211_HE_MAC_CAP1_TF_MAC_PAD_DUR_MASK	0x8
-
-#define	IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP		0x1
-#define	IEEE80211_HE_MAC_CAP2_ACK_EN			0x2
-#define	IEEE80211_HE_MAC_CAP2_BSR			0x4
-#define	IEEE80211_HE_MAC_CAP2_LINK_ADAPTATION		0x8
-#define	IEEE80211_HE_MAC_CAP2_BCAST_TWT			0x10
-#define	IEEE80211_HE_MAC_CAP2_ALL_ACK			0x20
-#define	IEEE80211_HE_MAC_CAP2_MU_CASCADING		0x40
-#define	IEEE80211_HE_MAC_CAP2_TRS			0x80
-
-#define	IEEE80211_HE_MAC_CAP3_OMI_CONTROL		0x02
-#define	IEEE80211_HE_MAC_CAP3_OFDMA_RA			0x04
-#define	IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_EXT_1	0x08
-#define	IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_EXT_2	0x10
-#define	IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_EXT_3	0x18
-#define	IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK	0x18
-#define	IEEE80211_HE_MAC_CAP3_FLEX_TWT_SCHED		0x40
-#define	IEEE80211_HE_MAC_CAP3_RX_CTRL_FRAME_TO_MULTIBSS	0x80
-
-#define	IEEE80211_HE_MAC_CAP4_AMDSU_IN_AMPDU		0x1
-#define	IEEE80211_HE_MAC_CAP4_BQR			0x2
-#define	IEEE80211_HE_MAC_CAP4_MULTI_TID_AGG_TX_QOS_B39	0x4
-#define	IEEE80211_HE_MAC_CAP4_AMSDU_IN_AMPDU		0x8
-#define	IEEE80211_HE_MAC_CAP4_OPS			0x10
-#define	IEEE80211_HE_MAC_CAP4_BSRP_BQRP_A_MPDU_AGG	0x20
-
-#define	IEEE80211_HE_MAC_CAP5_HE_DYNAMIC_SM_PS		0x1
-#define	IEEE80211_HE_MAC_CAP5_HT_VHT_TRIG_FRAME_RX	0x2
-#define	IEEE80211_HE_MAC_CAP5_MULTI_TID_AGG_TX_QOS_B40	0x4
-#define	IEEE80211_HE_MAC_CAP5_MULTI_TID_AGG_TX_QOS_B41	0x8
-#define	IEEE80211_HE_MAC_CAP5_UL_2x996_TONE_RU		0x10
-#define	IEEE80211_HE_MAC_CAP5_OM_CTRL_UL_MU_DATA_DIS_RX	0x20
-#define	IEEE80211_HE_MAC_CAP5_PUNCTURED_SOUNDING	0x40
-#define	IEEE80211_HE_MAC_CAP5_SUBCHAN_SELECTIVE_TRANSMISSION	0x80
-
-#define	IEEE80211_HE_MCS_NOT_SUPPORTED			0x0
-#define	IEEE80211_HE_MCS_SUPPORT_0_7			0x1
-#define	IEEE80211_HE_MCS_SUPPORT_0_9			0x2
-#define	IEEE80211_HE_MCS_SUPPORT_0_11			0x4
-
-#define	IEEE80211_HE_6GHZ_CAP_TX_ANTPAT_CONS		0x01
-#define	IEEE80211_HE_6GHZ_CAP_RX_ANTPAT_CONS		0x02
-#define	IEEE80211_HE_6GHZ_CAP_MIN_MPDU_START		0x04
-#define	IEEE80211_HE_6GHZ_CAP_MAX_MPDU_LEN		0x08
-#define	IEEE80211_HE_6GHZ_CAP_MAX_AMPDU_LEN_EXP		0x10
-#define	IEEE80211_HE_6GHZ_CAP_SM_PS			0x20
-
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G		0x1
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G	0x2
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G		0x4
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G	0x8
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_RU_MAPPING_IN_2G	0x10
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_RU_MAPPING_IN_5G	0x20
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_MASK			0x40
-#define	IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_MASK_ALL		0xff
-
-#define	IEEE80211_HE_PHY_CAP1_DEVICE_CLASS_A		0x1
-#define	IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD	0x2
-#define	IEEE80211_HE_PHY_CAP1_MIDAMBLE_RX_TX_MAX_NSTS	0x4
-#define	IEEE80211_HE_PHY_CAP1_PREAMBLE_PUNC_RX_MASK	0x8
-#define	IEEE80211_HE_PHY_CAP1_HE_LTF_AND_GI_FOR_HE_PPDUS_0_8US	0x10
-
-#define	IEEE80211_HE_PHY_CAP2_MIDAMBLE_RX_TX_MAX_NSTS	0x1
-#define	IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US	0x2
-#define	IEEE80211_HE_PHY_CAP2_STBC_TX_UNDER_80MHZ	0x4
-#define	IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ	0x8
-#define	IEEE80211_HE_PHY_CAP2_DOPPLER_TX		0x10
-#define	IEEE80211_HE_PHY_CAP2_UL_MU_PARTIAL_MU_MIMO	0x20
-#define	IEEE80211_HE_PHY_CAP2_UL_MU_FULL_MU_MIMO	0x40
-
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_MASK	0x1
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_NO_DCM	0x2
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_NO_DCM	0x4
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_RX_NSS_1		0x8
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_TX_NSS_1		0x10
-#define	IEEE80211_HE_PHY_CAP3_SU_BEAMFORMER		0x20
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_16_QAM	0x40
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_16_QAM	0x80
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_TX_NSS_2		0x10
-#define	IEEE80211_HE_PHY_CAP3_RX_PARTIAL_BW_SU_IN_20MHZ_MU	0x20
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_BPSK	0x40
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_BPSK	0x80
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_MASK	0x80
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_QPSK	0x80
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_QPSK	0x80
-#define	IEEE80211_HE_PHY_CAP3_DCM_MAX_RX_NSS_2		0x80
-
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_UNDER_80MHZ_8	0x1
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_ABOVE_80MHZ_8	0x2
-#define	IEEE80211_HE_PHY_CAP4_SU_BEAMFORMEE			0x4
-#define	IEEE80211_HE_PHY_CAP4_MU_BEAMFORMER			0x8
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_UNDER_80MHZ_4	0x10
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_ABOVE_80MHZ_4	0x20
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_ABOVE_80MHZ_MASK	0x40
-#define	IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_UNDER_80MHZ_MASK	0x80
-
-#define	IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_ABOVE_80MHZ_2	0x1
-#define	IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_UNDER_80MHZ_2	0x2
-#define	IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_UNDER_80MHZ_MASK	0x4
-#define	IEEE80211_HE_PHY_CAP5_NG16_MU_FEEDBACK				0x8
-#define	IEEE80211_HE_PHY_CAP5_NG16_SU_FEEDBACK				0x10
-#define	IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_ABOVE_80MHZ_MASK	0x20
-
-#define	IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT	0x1
-#define	IEEE80211_HE_PHY_CAP6_TRIG_MU_BEAMFORMER_FB	0x2
-#define	IEEE80211_HE_PHY_CAP6_TRIG_SU_BEAMFORMER_FB	0x4
-#define	IEEE80211_HE_PHY_CAP6_TRIG_SU_BEAMFORMING_FB	0x8
-#define	IEEE80211_HE_PHY_CAP6_TRIG_MU_BEAMFORMING_PARTIAL_BW_FB	0x20
-#define	IEEE80211_HE_PHY_CAP6_CODEBOOK_SIZE_42_SU	0x40
-#define	IEEE80211_HE_PHY_CAP6_CODEBOOK_SIZE_75_MU	0x80
-#define	IEEE80211_HE_PHY_CAP6_PARTIAL_BW_EXT_RANGE	0x80
-#define	IEEE80211_HE_PHY_CAP6_TRIG_CQI_FB		0x80
-#define	IEEE80211_HE_PHY_CAP6_PARTIAL_BANDWIDTH_DL_MUMIMO	0x80
-
-#define	IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI	0x1
-#define	IEEE80211_HE_PHY_CAP7_MAX_NC_1				0x2
-#define	IEEE80211_HE_PHY_CAP7_MAX_NC_2				0x4
-#define	IEEE80211_HE_PHY_CAP7_MAX_NC_MASK			0x6
-#define	IEEE80211_HE_PHY_CAP7_POWER_BOOST_FACTOR_AR		0x8
-#define	IEEE80211_HE_PHY_CAP7_POWER_BOOST_FACTOR_SUPP		0x10
-#define	IEEE80211_HE_PHY_CAP7_STBC_RX_ABOVE_80MHZ		0x20
-#define	IEEE80211_HE_PHY_CAP7_STBC_TX_ABOVE_80MHZ		0x40
-#define	IEEE80211_HE_PHY_CAP7_PSR_BASED_SR			0x80
-
-#define	IEEE80211_HE_PHY_CAP8_20MHZ_IN_160MHZ_HE_PPDU		0x1
-#define	IEEE80211_HE_PHY_CAP8_20MHZ_IN_40MHZ_HE_PPDU_IN_2G	0x2
-#define	IEEE80211_HE_PHY_CAP8_80MHZ_IN_160MHZ_HE_PPDU		0x4
-#define	IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_242			0x8
-#define	IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_484			0x10
-#define	IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_996			0x18
-#define	IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_2x996			0x20
-#define	IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_MASK			0x28
-#define	IEEE80211_HE_PHY_CAP8_HE_ER_SU_PPDU_4XLTF_AND_08_US_GI	0x40
-#define	IEEE80211_HE_PHY_CAP8_HE_ER_SU_1XLTF_AND_08_US_GI	0x80
-
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_0US		0x1
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_16US		0x2
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_8US		0x4
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_MASK		0x8
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_RESERVED	0x10
-#define	IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_POS		0x0
-#define	IEEE80211_HE_PHY_CAP9_NON_TRIGGERED_CQI_FEEDBACK	0x20
-#define	IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_COMP_SIGB	0x4
-#define	IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_NON_COMP_SIGB	0x8
-#define	IEEE80211_HE_PHY_CAP9_RX_1024_QAM_LESS_THAN_242_TONE_RU	0x10
-#define	IEEE80211_HE_PHY_CAP9_TX_1024_QAM_LESS_THAN_242_TONE_RU	0x20
-#define	IEEE80211_HE_PHY_CAP9_LONGER_THAN_16_SIGB_OFDM_SYM	0x40
-
-#define	IEEE80211_HE_PHY_CAP10_HE_MU_M1RU_MAX_LTF		0x1
-
-#define	IEEE80211_HE_OPERATION_BSS_COLOR_DISABLED		0x1
-#define	IEEE80211_HE_OPERATION_BSS_COLOR_OFFSET			0x2
-#define	IEEE80211_HE_OPERATION_ER_SU_DISABLE			0x4
-
-#define	IEEE80211_HE_SPR_HESIGA_SR_VAL15_ALLOWED		0x01
-#define	IEEE80211_HE_SPR_NON_SRG_OBSS_PD_SR_DISALLOWED		0x02
-#define	IEEE80211_HE_SPR_NON_SRG_OFFSET_PRESENT			0x04
-#define	IEEE80211_HE_SPR_SRG_INFORMATION_PRESENT		0x08
 
 #define	IEEE80211_EHT_MAC_CAP0_EPCS_PRIO_ACCESS			0x01
 #define	IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_11454		0x02
@@ -869,28 +727,12 @@ struct linuxkpi_ieee80211_regdomain {
 
 #define	VENDOR_CMD_RAW_DATA	(void *)(uintptr_t)(-ENOENT)
 
-struct ieee80211_he_cap_elem {
-	u8 mac_cap_info[6];
-	u8 phy_cap_info[11];
-} __packed;
-
-struct ieee80211_he_mcs_nss_supp {
-	/* TODO FIXME */
-	uint32_t	rx_mcs_80;
-	uint32_t	tx_mcs_80;
-	uint32_t	rx_mcs_160;
-	uint32_t	tx_mcs_160;
-	uint32_t	rx_mcs_80p80;
-	uint32_t	tx_mcs_80p80;
-};
-
-#define	IEEE80211_STA_HE_CAP_PPE_THRES_MAX	32
+/* net80211::net80211_he_cap */
 struct ieee80211_sta_he_cap {
-	/* TODO FIXME */
-	int					has_he;
+	bool					has_he;
 	struct ieee80211_he_cap_elem		he_cap_elem;
 	struct ieee80211_he_mcs_nss_supp	he_mcs_nss_supp;
-	uint8_t					ppe_thres[IEEE80211_STA_HE_CAP_PPE_THRES_MAX];
+	uint8_t					ppe_thres[IEEE80211_HE_CAP_PPE_THRES_MAX];
 };
 
 struct cfg80211_he_bss_color {
@@ -905,11 +747,6 @@ struct ieee80211_he_obss_pd {
 	uint8_t					sr_ctrl;
 	uint8_t					bss_color_bitmap[8];
 	uint8_t					partial_bssid_bitmap[8];
-};
-
-struct ieee80211_sta_he_6ghz_capa {
-	/* TODO FIXME */
-	int	capa;
 };
 
 struct ieee80211_eht_mcs_nss_supp_20mhz_only {
@@ -965,7 +802,7 @@ struct ieee80211_sband_iftype_data {
 	/* TODO FIXME */
 	enum nl80211_iftype			types_mask;
 	struct ieee80211_sta_he_cap		he_cap;
-	struct ieee80211_sta_he_6ghz_capa	he_6ghz_capa;
+	struct ieee80211_he_6ghz_capa		he_6ghz_capa;
 	struct ieee80211_sta_eht_cap		eht_cap;
 	struct {
 		const uint8_t			*data;
@@ -1009,9 +846,12 @@ struct cfg80211_wowlan_nd_info {
 
 enum wiphy_wowlan_support_flags {
 	WIPHY_WOWLAN_DISCONNECT,
-	WIPHY_WOWLAN_GTK_REKEY_FAILURE,
 	WIPHY_WOWLAN_MAGIC_PKT,
 	WIPHY_WOWLAN_SUPPORTS_GTK_REKEY,
+	WIPHY_WOWLAN_GTK_REKEY_FAILURE,
+	WIPHY_WOWLAN_EAP_IDENTITY_REQ,
+	WIPHY_WOWLAN_4WAY_HANDSHAKE,
+	WIPHY_WOWLAN_RFKILL_RELEASE,
 	WIPHY_WOWLAN_NET_DETECT,
 };
 
@@ -1025,6 +865,7 @@ struct cfg80211_wowlan_wakeup {
 	/* XXX TODO */
 	uint16_t				pattern_idx;
 	bool					disconnect;
+	bool					unprot_deauth_disassoc;
 	bool					eap_identity_req;
 	bool					four_way_handshake;
 	bool					gtk_rekey_failure;
@@ -1042,11 +883,22 @@ struct cfg80211_wowlan_wakeup {
 
 struct cfg80211_wowlan {
 	/* XXX TODO */
-	int	disconnect, gtk_rekey_failure, magic_pkt;
-	int	eap_identity_req, four_way_handshake, rfkill_release, tcp, any;
+	bool					any;
+	bool					disconnect;
+	bool					magic_pkt;
+	bool					gtk_rekey_failure;
+	bool					eap_identity_req;
+	bool					four_way_handshake;
+	bool					rfkill_release;
+
+	/* Magic packet patterns. */
 	int					n_patterns;
-	struct cfg80211_sched_scan_request	*nd_config;
 	struct cfg80211_pkt_pattern		*patterns;
+
+	/* netdetect? if not assoc? */
+	struct cfg80211_sched_scan_request	*nd_config;
+
+	void					*tcp;		/* XXX ? */
 };
 
 struct cfg80211_gtk_rekey_data {
@@ -1143,6 +995,18 @@ enum cfg80211_regulatory {
 	REGULATORY_COUNTRY_IE_FOLLOW_POWER	= BIT(6),
 };
 
+struct wiphy_radio_freq_range {
+	uint32_t				start_freq;
+	uint32_t				end_freq;
+};
+
+struct wiphy_radio {
+	int					n_freq_range;
+	int					n_iface_combinations;
+	const struct wiphy_radio_freq_range	*freq_range;
+	const struct ieee80211_iface_combination *iface_combinations;
+};
+
 enum wiphy_flags {
 	WIPHY_FLAG_AP_UAPSD			= BIT(0),
 	WIPHY_FLAG_HAS_CHANNEL_SWITCH		= BIT(1),
@@ -1207,6 +1071,9 @@ struct wiphy {
 	uint8_t					available_antennas_rx;
 	uint8_t					available_antennas_tx;
 
+	int					n_radio;
+	const struct wiphy_radio		*radio;
+
 	int	features, hw_version;
 	int	interface_modes, max_match_sets, max_remain_on_channel_duration, max_scan_ssids, max_sched_scan_ie_len, max_sched_scan_plan_interval, max_sched_scan_plan_iterations, max_sched_scan_plans, max_sched_scan_reqs, max_sched_scan_ssids;
 	int	num_iftype_ext_capab;
@@ -1220,7 +1087,9 @@ struct wiphy {
 
 	unsigned long				ext_features[BITS_TO_LONGS(NUM_NL80211_EXT_FEATURES)];
 	struct dentry				*debugfsdir;
-	struct cfg80211_wowlan_support		*wowlan;
+
+	const struct wiphy_wowlan_support	*wowlan;
+	struct cfg80211_wowlan			*wowlan_config;
 	/* Lower layer (driver/mac80211) specific data. */
 	/* Must stay last. */
 	uint8_t					priv[0] __aligned(CACHE_LINE_SIZE);
@@ -1231,8 +1100,9 @@ struct wiphy {
 
 struct wireless_dev {
 		/* XXX TODO, like ic? */
-	int		iftype;
-	int     address;
+	enum nl80211_iftype			iftype;
+	uint32_t				radio_mask;
+	uint8_t					address[ETH_ALEN];
 	struct net_device			*netdev;
 	struct wiphy				*wiphy;
 };
@@ -1304,6 +1174,7 @@ void linuxkpi_wiphy_delayed_work_cancel(struct wiphy *,
 
 int linuxkpi_regulatory_set_wiphy_regd_sync(struct wiphy *wiphy,
     struct linuxkpi_ieee80211_regdomain *regd);
+uint32_t linuxkpi_cfg80211_calculate_bitrate(struct rate_info *);
 uint32_t linuxkpi_ieee80211_channel_to_frequency(uint32_t, enum nl80211_band);
 uint32_t linuxkpi_ieee80211_frequency_to_channel(uint32_t, uint32_t);
 struct linuxkpi_ieee80211_channel *
@@ -1353,20 +1224,11 @@ wiphy_dev(struct wiphy *wiphy)
 	return (wiphy->dev);
 }
 
-#define	wiphy_dereference(wiphy, p)					\
-    rcu_dereference_check(p, lockdep_is_held(&(wiphy)->mtx))
+#define	wiphy_dereference(_w, p)					\
+    rcu_dereference_check(p, lockdep_is_held(&(_w)->mtx))
 
-static __inline void
-wiphy_lock(struct wiphy *wiphy)
-{
-	mutex_lock(&wiphy->mtx);
-}
-
-static __inline void
-wiphy_unlock(struct wiphy *wiphy)
-{
-	mutex_unlock(&wiphy->mtx);
-}
+#define	wiphy_lock(_w)		mutex_lock(&(_w)->mtx)
+#define	wiphy_unlock(_w)	mutex_unlock(&(_w)->mtx)
 
 static __inline void
 wiphy_rfkill_set_hw_state_reason(struct wiphy *wiphy, bool blocked,
@@ -1417,6 +1279,18 @@ rfkill_soft_blocked(int rfkill)
 	return (false);
 }
 
+static __inline void
+wiphy_rfkill_start_polling(struct wiphy *wiphy)
+{
+	TODO();
+}
+
+static __inline void
+wiphy_rfkill_stop_polling(struct wiphy *wiphy)
+{
+	TODO();
+}
+
 static __inline int
 reg_query_regdb_wmm(uint8_t *alpha2, uint32_t center_freq,
     struct ieee80211_reg_rule *rule)
@@ -1458,38 +1332,72 @@ cfg80211_pmsr_report(struct wireless_dev *wdev,
 	TODO();
 }
 
-static __inline void
+static inline void
 cfg80211_chandef_create(struct cfg80211_chan_def *chandef,
-    struct linuxkpi_ieee80211_channel *chan, enum nl80211_chan_flags chan_flag)
+    struct linuxkpi_ieee80211_channel *chan, enum nl80211_channel_type chan_type)
 {
 
 	KASSERT(chandef != NULL, ("%s: chandef is NULL\n", __func__));
 	KASSERT(chan != NULL, ("%s: chan is NULL\n", __func__));
 
-	memset(chandef, 0, sizeof(*chandef));
+	/* memset(chandef, 0, sizeof(*chandef)); */
 	chandef->chan = chan;
-	chandef->center_freq2 = 0;	/* Set here and only overwrite if needed. */
+	chandef->center_freq1 = chan->center_freq;
+	/* chandef->width, center_freq2, punctured */
 
-	switch (chan_flag) {
+	switch (chan_type) {
 	case NL80211_CHAN_NO_HT:
 		chandef->width = NL80211_CHAN_WIDTH_20_NOHT;
-		chandef->center_freq1 = chan->center_freq;
 		break;
-	default:
-		IMPROVE("Also depends on our manual settings");
-		if (chan->flags & IEEE80211_CHAN_NO_HT40)
-			chandef->width = NL80211_CHAN_WIDTH_20;
-		else if (chan->flags & IEEE80211_CHAN_NO_80MHZ)
-			chandef->width = NL80211_CHAN_WIDTH_40;
-		else if (chan->flags & IEEE80211_CHAN_NO_160MHZ)
-			chandef->width = NL80211_CHAN_WIDTH_80;
-		else {
-			chandef->width = NL80211_CHAN_WIDTH_160;
-			IMPROVE("80P80 and 320 ...");
-		}
-		chandef->center_freq1 = chan->center_freq;
+	case NL80211_CHAN_HT20:
+		chandef->width = NL80211_CHAN_WIDTH_20;
+		break;
+	case NL80211_CHAN_HT40MINUS:
+		chandef->width = NL80211_CHAN_WIDTH_40;
+		chandef->center_freq1 -= 10;
+		break;
+	case NL80211_CHAN_HT40PLUS:
+		chandef->width = NL80211_CHAN_WIDTH_40;
+		chandef->center_freq1 += 10;
 		break;
 	};
+}
+
+static __inline bool
+cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
+{
+	TODO();
+	return (false);
+}
+
+static __inline bool
+cfg80211_chandef_dfs_usable(struct wiphy *wiphy, const struct cfg80211_chan_def *chandef)
+{
+	TODO();
+	return (false);
+}
+
+static __inline unsigned int
+cfg80211_chandef_dfs_cac_time(struct wiphy *wiphy, const struct cfg80211_chan_def *chandef)
+{
+	TODO();
+	return (0);
+}
+
+static __inline bool
+cfg80211_chandef_identical(const struct cfg80211_chan_def *chandef_1,
+    const struct cfg80211_chan_def *chandef_2)
+{
+	TODO();
+	return (false);
+}
+
+static __inline bool
+cfg80211_chandef_usable(struct wiphy *wiphy,
+    const struct cfg80211_chan_def *chandef, uint32_t flags)
+{
+	TODO();
+	return (false);
 }
 
 static __inline void
@@ -1574,11 +1482,10 @@ cfg80211_find_vendor_ie(unsigned int oui, int oui_type,
 	return (__DECONST(uint8_t *, elem));
 }
 
-static __inline uint32_t
+static inline uint32_t
 cfg80211_calculate_bitrate(struct rate_info *rate)
 {
-	TODO();
-	return (-1);
+	return (linuxkpi_cfg80211_calculate_bitrate(rate));
 }
 
 static __inline uint32_t
@@ -1957,7 +1864,7 @@ cfg80211_channel_is_psc(struct linuxkpi_ieee80211_channel *channel)
 
 static inline int
 cfg80211_get_ies_channel_number(const uint8_t *ie, size_t len,
-    enum nl80211_band band, enum cfg80211_bss_frame_type ftype)
+    enum nl80211_band band)
 {
 	const struct element *elem;
 
@@ -2026,27 +1933,6 @@ cfg80211_find_ext_ie(uint8_t eid, const uint8_t *p, size_t len)
 {
 	TODO();
 	return (NULL);
-}
-
-static __inline bool
-cfg80211_chandef_valid(const struct cfg80211_chan_def *chandef)
-{
-	TODO();
-	return (false);
-}
-
-static __inline bool
-cfg80211_chandef_dfs_usable(struct wiphy *wiphy, const struct cfg80211_chan_def *chandef)
-{
-	TODO();
-	return (false);
-}
-
-static __inline unsigned int
-cfg80211_chandef_dfs_cac_time(struct wiphy *wiphy, const struct cfg80211_chan_def *chandef)
-{
-	TODO();
-	return (0);
 }
 
 static inline void
@@ -2140,6 +2026,14 @@ cfg80211_get_iftype_ext_capa(struct wiphy *wiphy, enum nl80211_iftype iftype)
 	return (NULL);
 }
 
+static inline uint16_t
+ieee80211_get_he_6ghz_capa(const struct ieee80211_supported_band *sband,
+    enum nl80211_iftype iftype)
+{
+	TODO();
+	return (0);
+}
+
 static inline int
 nl80211_chan_width_to_mhz(enum nl80211_chan_width width)
 {
@@ -2168,6 +2062,16 @@ nl80211_chan_width_to_mhz(enum nl80211_chan_width width)
 		return (320);
 		break;
 	}
+}
+
+static __inline ssize_t
+wiphy_locked_debugfs_write(struct wiphy *wiphy, struct file *file,
+    char *buf, size_t bufsize, const char __user *userbuf, size_t count,
+    ssize_t (*handler)(struct wiphy *, struct file *, char *, size_t, void *),
+    void *data)
+{
+	TODO();
+	return (-ENXIO);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2222,9 +2126,9 @@ wiphy_delayed_work_cancel(struct wiphy *wiphy, struct wiphy_delayed_work *wdwk)
 #define	wiphy_err(_wiphy, _fmt, ...)					\
     dev_err((_wiphy)->dev, _fmt, __VA_ARGS__)
 #define	wiphy_info(wiphy, fmt, ...)					\
-    dev_info(&(wiphy)->dev, fmt, ##__VA_ARGS__)
+    dev_info((wiphy)->dev, fmt, ##__VA_ARGS__)
 #define	wiphy_info_once(wiphy, fmt, ...)				\
-    dev_info_once(&(wiphy)->dev, fmt, ##__VA_ARGS__)
+    dev_info_once((wiphy)->dev, fmt, ##__VA_ARGS__)
 
 #ifndef LINUXKPI_NET80211
 #define	ieee80211_channel		linuxkpi_ieee80211_channel

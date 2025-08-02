@@ -41,9 +41,9 @@
 #include <sys/poll.h>
 #include <sys/sx.h>
 #include <sys/ctype.h>
+#include <sys/stdarg.h>
 #include <sys/ucred.h>
 #include <sys/taskqueue.h>
-#include <machine/stdarg.h>
 
 #include <fs/devfs/devfs_int.h>
 #include <vm/vm.h>
@@ -1243,6 +1243,19 @@ devtoname(struct cdev *dev)
 {
 
 	return (dev->si_name);
+}
+
+void
+dev_copyname(struct cdev *dev, char *path, size_t len)
+{
+	struct cdevsw *csw;
+	int ref;
+
+	csw = dev_refthread(dev, &ref);
+	if (csw != NULL) {
+		strlcpy(path, dev->si_name, len);
+		dev_relthread(dev, ref);
+	}
 }
 
 int

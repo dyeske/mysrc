@@ -38,6 +38,7 @@
 #include <sys/fcntl.h>
 #include <sys/interrupt.h>
 #include <sys/sbuf.h>
+#include <sys/stdarg.h>
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -58,7 +59,6 @@
 #include <cam/mmc/mmc.h>
 #include <cam/mmc/mmc_bus.h>
 
-#include <machine/stdarg.h>	/* for xpt_print below */
 #include <machine/_inttypes.h>  /* for PRIu64 */
 
 FEATURE(mmccam, "CAM-based MMC/SD/SDIO stack");
@@ -283,8 +283,8 @@ mmc_scan_lun(struct cam_periph *periph, struct cam_path *path,
 					  path, NULL, 0,
 					  request_ccb);
                 if (status != CAM_REQ_CMP) {
-			xpt_print(path, "xpt_scan_lun: cam_alloc_periph "
-                                  "returned an error, can't continue probe\n");
+			xpt_print(path,
+	"xpt_scan_lun: cam_alloc_periph returned an error, can't continue probe\n");
 		}
 		request_ccb->ccb_h.status = status;
 		xpt_done(request_ccb);
@@ -516,16 +516,16 @@ mmcprobe_register(struct cam_periph *periph, void *arg)
 
 	request_ccb = (union ccb *)arg;
 	if (request_ccb == NULL) {
-		printf("mmcprobe_register: no probe CCB, "
-		       "can't register device\n");
+		printf(
+		    "mmcprobe_register: no probe CCB, can't register device\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 
 	softc = (mmcprobe_softc *)malloc(sizeof(*softc), M_CAMXPT, M_NOWAIT);
 
 	if (softc == NULL) {
-		printf("proberegister: Unable to probe new device. "
-		       "Unable to allocate softc\n");
+		printf(
+	"proberegister: Unable to probe new device. Unable to allocate softc\n");
 		return(CAM_REQ_CMP_ERR);
 	}
 
@@ -539,8 +539,9 @@ mmcprobe_register(struct cam_periph *periph, void *arg)
 
         memset(&periph->path->device->mmc_ident_data, 0, sizeof(struct mmc_params));
 	if (status != 0) {
-		printf("proberegister: cam_periph_acquire failed (status=%d)\n",
-			status);
+		printf(
+		    "proberegister: cam_periph_acquire failed (status=%d)\n",
+		    status);
 		return (CAM_REQ_CMP_ERR);
 	}
 	CAM_DEBUG(periph->path, CAM_DEBUG_PROBE, ("Probe started\n"));
@@ -609,7 +610,6 @@ mmcprobe_start(struct cam_periph *periph, union ccb *start_ccb)
 		CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("Start with PROBE_RESET\n"));
 		/* FALLTHROUGH */
 	case PROBE_IDENTIFY:
-		xpt_path_inq(&start_ccb->cpi, periph->path);
 		CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("Start with PROBE_IDENTIFY\n"));
 		init_standard_ccb(start_ccb, XPT_MMC_GET_TRAN_SETTINGS);
 		break;
@@ -1212,9 +1212,9 @@ mmc_path_inq(struct ccb_pathinq *cpi, const char *hba,
 	cpi->max_lun = 0;
 	cpi->initiator_id = 1;
 	cpi->maxio = maxio;
-	strncpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
-	strncpy(cpi->hba_vid, hba, HBA_IDLEN);
-	strncpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
+	strlcpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
+	strlcpy(cpi->hba_vid, hba, HBA_IDLEN);
+	strlcpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
 	cpi->unit_number = cam_sim_unit(sim);
 	cpi->bus_id = cam_sim_bus(sim);
 	cpi->protocol = PROTO_MMCSD;

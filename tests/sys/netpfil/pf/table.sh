@@ -109,6 +109,46 @@ v6_counters_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "match_counters" "cleanup"
+match_counters_head()
+{
+	atf_set descr 'Test that counters for tables in match rules work'
+	atf_set require.user root
+}
+
+match_counters_body()
+{
+	pft_init
+
+	epair_send=$(vnet_mkepair)
+	ifconfig ${epair_send}a 192.0.2.1/24 up
+
+	vnet_mkjail alcatraz ${epair_send}b
+	jexec alcatraz ifconfig ${epair_send}b 192.0.2.2/24 up
+	jexec alcatraz pfctl -e
+
+	pft_set_rules alcatraz \
+	    "table <foo> counters { 192.0.2.1 }" \
+	    "pass all" \
+	    "match in from <foo> to any" \
+	    "match out from any to <foo>" \
+	    "set skip on lo"
+
+	atf_check -s exit:0 -o ignore ping -c 3 192.0.2.2
+
+	atf_check -s exit:0 -e ignore \
+	    -o match:'In/Block:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'In/Pass:.*'"$TABLE_STATS_NONZERO_REGEXP" \
+	    -o match:'Out/Block:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'Out/Pass:.*'"$TABLE_STATS_NONZERO_REGEXP" \
+	    jexec alcatraz pfctl -t foo -T show -vv
+}
+
+match_counters_cleanup()
+{
+	pft_cleanup
+}
+
 atf_test_case "zero_one" "cleanup"
 zero_one_head()
 {
@@ -132,6 +172,8 @@ ctime_to_unixtime()
 
 zero_one_body()
 {
+	pft_init
+
 	epair_send=$(vnet_mkepair)
 	ifconfig ${epair_send}a 192.0.2.1/24 up
 	ifconfig ${epair_send}a inet alias 192.0.2.3/24
@@ -194,6 +236,60 @@ zero_one_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "zero_all" "cleanup"
+zero_all_head()
+{
+	atf_set descr 'Test zeroing all table entries'
+	atf_set require.user root
+}
+
+zero_all_body()
+{
+	pft_init
+
+	epair_send=$(vnet_mkepair)
+	ifconfig ${epair_send}a 192.0.2.1/24 up
+	ifconfig ${epair_send}a inet alias 192.0.2.3/24
+
+	vnet_mkjail alcatraz ${epair_send}b
+	jexec alcatraz ifconfig ${epair_send}b 192.0.2.2/24 up
+	jexec alcatraz pfctl -e
+
+	pft_set_rules alcatraz \
+	    "table <foo> counters { 192.0.2.1, 192.0.2.3 }" \
+	    "block all" \
+	    "pass in from <foo> to any" \
+	    "pass out from any to <foo>" \
+	    "set skip on lo"
+
+	atf_check -s exit:0 -o ignore ping -c 3 -S 192.0.2.1 192.0.2.2
+	atf_check -s exit:0 -o ignore ping -c 3 -S 192.0.2.3 192.0.2.2
+
+	jexec alcatraz pfctl -t foo -T show -vv
+	atf_check -s exit:0 -e ignore \
+	    -o match:'In/Block:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'In/Pass:.*'"$TABLE_STATS_NONZERO_REGEXP" \
+	    -o match:'Out/Block:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'Out/Pass:.*'"$TABLE_STATS_NONZERO_REGEXP" \
+	    jexec alcatraz pfctl -t foo -T show -vv
+
+	atf_check -s exit:0 -e ignore \
+	    jexec alcatraz pfctl -t foo -T zero
+
+	jexec alcatraz pfctl -t foo -T show -vv
+	atf_check -s exit:0 -e ignore \
+	    -o match:'In/Pass:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'Out/Pass:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'In/Pass:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    -o match:'Out/Pass:.*'"$TABLE_STATS_ZERO_REGEXP" \
+	    jexec alcatraz pfctl -t foo -T show -vv
+}
+
+zero_all_cleanup()
+{
+	pft_cleanup
+}
+
 atf_test_case "reset_nonzero" "cleanup"
 reset_nonzero_head()
 {
@@ -203,6 +299,8 @@ reset_nonzero_head()
 
 reset_nonzero_body()
 {
+	pft_init
+
 	epair_send=$(vnet_mkepair)
 	ifconfig ${epair_send}a 192.0.2.1/24 up
 	ifconfig ${epair_send}a inet alias 192.0.2.3/24
@@ -484,11 +582,41 @@ anchor_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "flush" "cleanup"
+flush_head()
+{
+	atf_set descr 'Test flushing addresses from tables'
+	atf_set require.user root
+}
+
+flush_body()
+{
+	pft_init
+
+	vnet_mkjail alcatraz
+
+	atf_check -s exit:0 -e match:"1/1 addresses added." \
+	    jexec alcatraz pfctl -t foo -T add 1.2.3.4
+	atf_check -s exit:0 -o match:"   1.2.3.4" \
+	    jexec alcatraz pfctl -t foo -T show
+	atf_check -s exit:0 -e match:"1 addresses deleted." \
+	    jexec alcatraz pfctl -t foo -T flush
+	atf_check -s exit:0 -o not-match:"1.2.3.4" \
+	    jexec alcatraz pfctl -t foo -T show
+}
+
+flush_cleanup()
+{
+	pft_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "v4_counters"
 	atf_add_test_case "v6_counters"
+	atf_add_test_case "match_counters"
 	atf_add_test_case "zero_one"
+	atf_add_test_case "zero_all"
 	atf_add_test_case "reset_nonzero"
 	atf_add_test_case "pr251414"
 	atf_add_test_case "automatic"
@@ -496,4 +624,5 @@ atf_init_test_cases()
 	atf_add_test_case "pr259689"
 	atf_add_test_case "precreate"
 	atf_add_test_case "anchor"
+	atf_add_test_case "flush"
 }

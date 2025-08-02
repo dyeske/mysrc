@@ -2,6 +2,7 @@
  * Copyright (c) 2001 Benno Rice <benno@FreeBSD.org>
  * Copyright (c) 2007 Semihalf, Rafal Jaworowski <raj@semihalf.com>
  * All rights reserved.
+ * Copyright (c) 2024 The FreeBSD Foundation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -40,6 +41,28 @@
 #include "bootstrap.h"
 #include "loader_efi.h"
 
+static void
+riscv_set_boot_hart(struct preloaded_file *fp)
+{
+	EFI_GUID riscvboot = RISCV_EFI_BOOT_PROTOCOL_GUID;
+	RISCV_EFI_BOOT_PROTOCOL *proto;
+	EFI_STATUS status = 0;
+	uint64_t boot_hartid = ULONG_MAX;
+
+	status = BS->LocateProtocol(&riscvboot, NULL, (void **)&proto);
+	if (EFI_ERROR(status)) {
+		return;
+	}
+
+	status = proto->GetBootHartId(proto, &boot_hartid);
+	if (EFI_ERROR(status)) {
+		return;
+	}
+
+	file_addmetadata(fp, MODINFOMD_BOOT_HARTID, sizeof(boot_hartid),
+	    &boot_hartid);
+}
+
 static int
 __elfN(exec)(struct preloaded_file *fp)
 {
@@ -52,6 +75,8 @@ __elfN(exec)(struct preloaded_file *fp)
 	if ((fmp = file_findmetadata(fp, MODINFOMD_ELFHDR)) == NULL)
 		return (EFTYPE);
 
+	riscv_set_boot_hart(fp);
+
 	e = (Elf_Ehdr *)&fmp->md_data;
 
 	efi_time_fini();
@@ -61,16 +86,16 @@ __elfN(exec)(struct preloaded_file *fp)
 	printf("Kernel entry at %p...\n", entry);
 	printf("Kernel args: %s\n", fp->f_args);
 
+	/*
+	 * we have to cleanup here because net_cleanup() doesn't work after
+	 * we call ExitBootServices
+	 */
+	dev_cleanup();
+
 	if ((error = bi_load(fp->f_args, &modulep, &kernend, true)) != 0) {
 		efi_time_init();
 		return (error);
 	}
-
-	/*
-	 * At this point we've called ExitBootServices, so we can't call
-	 * printf or any other function that uses Boot Services
-	 */
-	dev_cleanup();
 
 	(*entry)((void *)modulep);
 	panic("exec returned");

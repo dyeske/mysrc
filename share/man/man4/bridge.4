@@ -1,3 +1,6 @@
+.\"
+.\" SPDX-License-Identifier: BSD-4-Clause
+.\"
 .\"	$NetBSD: bridge.4,v 1.5 2004/01/31 20:14:11 jdc Exp $
 .\"
 .\" Copyright 2001 Wasabi Systems, Inc.
@@ -33,7 +36,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd April 10, 2023
+.Dd July 5, 2025
 .Dt IF_BRIDGE 4
 .Os
 .Sh NAME
@@ -76,10 +79,12 @@ command or using the
 variable in
 .Xr rc.conf 5 .
 .Pp
-The
+When it is created, the
 .Nm
-interface randomly chooses a link (MAC) address in the range reserved for
-locally administered addresses when it is created.
+interface gets assigned a link (MAC) address in the range of universally
+administered addresses reserved for the FreeBSD Foundation by hashing
+the host UUID, jail name, and the interface name.
+If this fails, a random, locally administered address is generated instead.
 This address is guaranteed to be unique
 .Em only
 across all
@@ -125,7 +130,8 @@ variable
 to
 .Li 0 .
 .Pp
-All the bridged member interfaces need to be up in order to pass network traffic.
+All the bridged member interfaces need to be up
+in order to pass network traffic.
 These can be enabled using
 .Xr ifconfig 8
 or
@@ -154,6 +160,25 @@ This can be used to multiplex the input of two or more interfaces into a single
 stream.
 This is useful for reconstructing the traffic for network taps
 that transmit the RX/TX signals out through two separate interfaces.
+.Pp
+To allow the host to communicate with bridge members, IP addresses
+should be assigned to the
+.Nm
+interface itself, not to the bridge's member interfaces.
+Attempting to assign an IP address to a bridge member interface, or add
+a member interface with an assigned IP address to a bridge, will return
+an
+.Dv EINVAL
+.Dq ( "Invalid argument" )
+error.
+For compatibility with older releases where this was permitted, setting
+the
+.Xr sysctl 8
+variable
+.Va net.link.bridge.member_ifaddrs
+to 1 will permit this configuration.
+This sysctl variable will be removed in
+.Fx 16.0.
 .Sh IPV6 SUPPORT
 .Nm
 supports the
@@ -164,11 +189,6 @@ The following
 variable configures an IPv6 link-local address on
 .Li bridge0
 interface:
-.Bd -literal -offset indent
-ifconfig_bridge0_ipv6="up"
-.Ed
-.Pp
-or in a more explicit manner:
 .Bd -literal -offset indent
 ifconfig_bridge0_ipv6="inet6 auto_linklocal"
 .Ed
@@ -251,6 +271,54 @@ by setting the
 .Va net.link.bridge.log_stp
 node using
 .Xr sysctl 8 .
+.Sh VLAN SUPPORT
+The
+.Nm
+driver has full support for virtual LANs (VLANs).
+The bridge implements independent VLAN learning, i.e. MAC addresses are
+learned on a per-VLAN basis, and the same MAC address may be learned on
+multiple interfaces on different VLANs.
+Incoming frames with an 802.1Q tag will be assigned to the appropriate
+VLAN.
+.Pp
+Traffic sent to or from the host is not assigned to a VLAN by default.
+To allow the host to communicate on a VLAN, configure a
+.Xr vlan 4
+interface on the bridge and (if necessary) assign IP addresses there.
+.Pp
+By default no access control is enabled, so any interface may
+participate in any VLAN.
+.Pp
+VLAN filtering may be enabled on an interface using the
+.Xr ifconfig 8
+.Cm vlanfilter
+option.
+When VLAN filtering is enabled, an interface may only send and receive
+frames based on its configured VLAN access list.
+.Pp
+The interface's untagged VLAN ID may be configured using the
+.Xr ifconfig 8
+.Cm untagged
+option.
+If an untagged VLAN ID is configured, incoming frames will be assigned
+to that VLAN, and the interface may receive outgoing untagged frames
+in that VLAN.
+.Pp
+The tagged VLAN access list may be configured using the
+.Cm tagged ,
+.Cm +tagged
+and
+.Cm -tagged
+options to
+.Xr ifconfig 8 .
+An interface may send and receive tagged frames for any VLAN in its
+access list.
+.Pp
+The bridge will automatically insert or remove 802.1q tags as needed,
+based on the interface configuration, when forwarding frames between
+interfaces.
+This tag processing is only done for interfaces with VLAN filtering
+enabled.
 .Sh PACKET FILTERING
 Packet filtering can be used with any firewall package that hooks in via the
 .Xr pfil 9
@@ -261,7 +329,7 @@ the appropriate interfaces.
 Either stage can be disabled.
 The filtering behavior can be controlled using
 .Xr sysctl 8 :
-.Bl -tag -width ".Va net.link.bridge.pfil_onlyip"
+.Bl -tag -width indent
 .It Va net.link.bridge.pfil_onlyip
 Controls the handling of non-IP packets which are not passed to
 .Xr pfil 9 .
@@ -470,8 +538,8 @@ ifconfig_fxp0="up"
 .Ed
 .Pp
 Consider a system with two 4-port Ethernet boards.
-The following will cause a bridge consisting of all 8 ports with Rapid Spanning
-Tree enabled to be created:
+The following will cause a bridge consisting of all 8 ports with
+Rapid Spanning Tree enabled to be created:
 .Bd -literal -offset indent
 ifconfig bridge0 create
 ifconfig bridge0 \e
@@ -518,6 +586,7 @@ ifconfig bridge0 addm fxp0 addm gif0 up
 .Xr ipfw 4 ,
 .Xr netmap 4 ,
 .Xr pf 4 ,
+.Xr vlan 4 ,
 .Xr ifconfig 8
 .Sh HISTORY
 The

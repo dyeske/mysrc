@@ -441,9 +441,16 @@ umtxq_unbusy(struct umtx_key *key)
 }
 
 void
+umtxq_busy_unlocked(struct umtx_key *key)
+{
+	umtxq_lock(key);
+	umtxq_busy(key);
+	umtxq_unlock(key);
+}
+
+void
 umtxq_unbusy_unlocked(struct umtx_key *key)
 {
-
 	umtxq_lock(key);
 	umtxq_unbusy(key);
 	umtxq_unlock(key);
@@ -686,6 +693,7 @@ umtx_abs_timeout_init(struct umtx_abs_timeout *timo, int clockid,
 		timo->is_abs_real = clockid == CLOCK_REALTIME ||
 		    clockid == CLOCK_REALTIME_FAST ||
 		    clockid == CLOCK_REALTIME_PRECISE ||
+		    clockid == CLOCK_TAI ||
 		    clockid == CLOCK_SECOND;
 	}
 }
@@ -780,6 +788,7 @@ umtx_abs_timeout_getsbt(struct umtx_abs_timeout *timo, sbintime_t *sbt,
 	case CLOCK_PROF:
 	case CLOCK_THREAD_CPUTIME_ID:
 	case CLOCK_PROCESS_CPUTIME_ID:
+	case CLOCK_TAI: /* Boot time is not necessarily stable in TAI */
 	default:
 		kern_clock_gettime(curthread, timo->clockid, &timo->cur);
 		if (timespeccmp(&timo->end, &timo->cur, <=))
@@ -2372,9 +2381,7 @@ do_lock_pi(struct thread *td, struct umutex *m, uint32_t flags,
 		if (error != 0)
 			break;
 
-		umtxq_lock(&uq->uq_key);
-		umtxq_busy(&uq->uq_key);
-		umtxq_unlock(&uq->uq_key);
+		umtxq_busy_unlocked(&uq->uq_key);
 
 		/*
 		 * Set the contested bit so that a release in user space
@@ -2540,9 +2547,7 @@ do_lock_pp(struct thread *td, struct umutex *m, uint32_t flags,
 	su = (priv_check(td, PRIV_SCHED_RTPRIO) == 0);
 	for (;;) {
 		old_inherited_pri = uq->uq_inherited_pri;
-		umtxq_lock(&uq->uq_key);
-		umtxq_busy(&uq->uq_key);
-		umtxq_unlock(&uq->uq_key);
+		umtxq_busy_unlocked(&uq->uq_key);
 
 		rv = fueword32(&m->m_ceilings[0], &ceiling);
 		if (rv == -1) {
@@ -2616,6 +2621,10 @@ do_lock_pp(struct thread *td, struct umutex *m, uint32_t flags,
 			}
 		} else if (owner == UMUTEX_RB_NOTRECOV) {
 			error = ENOTRECOVERABLE;
+		} else if (owner == UMUTEX_CONTESTED) {
+			/* Spurious failure, retry. */
+			umtxq_unbusy_unlocked(&uq->uq_key);
+			continue;
 		}
 
 		if (try != 0)
@@ -2723,9 +2732,8 @@ do_unlock_pp(struct thread *td, struct umutex *m, uint32_t flags, bool rb)
 	    TYPE_PP_ROBUST_UMUTEX : TYPE_PP_UMUTEX, GET_SHARE(flags),
 	    &key)) != 0)
 		return (error);
-	umtxq_lock(&key);
-	umtxq_busy(&key);
-	umtxq_unlock(&key);
+	umtxq_busy_unlocked(&key);
+
 	/*
 	 * For priority protected mutex, always set unlocked state
 	 * to UMUTEX_CONTESTED, so that userland always enters kernel
@@ -2788,9 +2796,7 @@ do_set_ceiling(struct thread *td, struct umutex *m, uint32_t ceiling,
 	    &uq->uq_key)) != 0)
 		return (error);
 	for (;;) {
-		umtxq_lock(&uq->uq_key);
-		umtxq_busy(&uq->uq_key);
-		umtxq_unlock(&uq->uq_key);
+		umtxq_busy_unlocked(&uq->uq_key);
 
 		rv = fueword32(&m->m_ceilings[0], &save_ceiling);
 		if (rv == -1) {
@@ -2825,6 +2831,10 @@ do_set_ceiling(struct thread *td, struct umutex *m, uint32_t ceiling,
 		} else if (owner == UMUTEX_RB_NOTRECOV) {
 			error = ENOTRECOVERABLE;
 			break;
+		} else if (owner == UMUTEX_CONTESTED) {
+			/* Spurious failure, retry. */
+			umtxq_unbusy_unlocked(&uq->uq_key);
+			continue;
 		}
 
 		/*
@@ -2945,8 +2955,9 @@ do_cv_wait(struct thread *td, struct ucond *cv, struct umutex *m,
 			umtx_key_release(&uq->uq_key);
 			return (EFAULT);
 		}
-		if (clockid < CLOCK_REALTIME ||
-		    clockid >= CLOCK_THREAD_CPUTIME_ID) {
+		if ((clockid < CLOCK_REALTIME ||
+		    clockid >= CLOCK_THREAD_CPUTIME_ID) &&
+		    clockid != CLOCK_TAI) {
 			/* hmm, only HW clock id will work. */
 			umtx_key_release(&uq->uq_key);
 			return (EINVAL);
@@ -3140,9 +3151,7 @@ do_rw_rdlock(struct thread *td, struct urwlock *rwlock, long fflag,
 			break;
 
 		/* grab monitor lock */
-		umtxq_lock(&uq->uq_key);
-		umtxq_busy(&uq->uq_key);
-		umtxq_unlock(&uq->uq_key);
+		umtxq_busy_unlocked(&uq->uq_key);
 
 		/*
 		 * re-read the state, in case it changed between the try-lock above
@@ -3333,9 +3342,7 @@ do_rw_wrlock(struct thread *td, struct urwlock *rwlock, struct _umtx_time *timeo
 		}
 
 		/* grab monitor lock */
-		umtxq_lock(&uq->uq_key);
-		umtxq_busy(&uq->uq_key);
-		umtxq_unlock(&uq->uq_key);
+		umtxq_busy_unlocked(&uq->uq_key);
 
 		/*
 		 * Re-read the state, in case it changed between the
@@ -3789,7 +3796,7 @@ do_sem2_wake(struct thread *td, struct _usem2 *sem)
 				rv = casueword32(&sem->_count, count, &count,
 				    count & ~USEM_HAS_WAITERS);
 				if (rv == 1) {
-					rv = thread_check_susp(td, true);
+					rv = thread_check_susp(td, false);
 					if (rv != 0)
 						break;
 				}

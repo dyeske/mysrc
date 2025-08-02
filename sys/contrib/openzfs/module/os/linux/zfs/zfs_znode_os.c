@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -767,7 +768,7 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	if (S_ISREG(vap->va_mode) || S_ISDIR(vap->va_mode)) {
 		/*
 		 * With ZFS_PROJID flag, we can easily know whether there is
-		 * project ID stored on disk or not. See zfs_space_delta_cb().
+		 * project ID stored on disk or not. See zpl_get_file_info().
 		 */
 		if (obj_type != DMU_OT_ZNODE &&
 		    dmu_objset_projectquota_enabled(zfsvfs->z_os))
@@ -1517,7 +1518,7 @@ zfs_extend(znode_t *zp, uint64_t end)
 		newblksz = 0;
 	}
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		zfs_rangelock_exit(lr);
@@ -1703,7 +1704,7 @@ zfs_trunc(znode_t *zp, uint64_t end)
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
 	dmu_tx_mark_netfree(tx);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		zfs_rangelock_exit(lr);
@@ -1774,7 +1775,7 @@ log:
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		goto out;

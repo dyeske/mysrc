@@ -123,6 +123,7 @@ SUBDIR=	alias \
 	revoke \
 	rpcinfo \
 	rs \
+	runat \
 	rup \
 	ruptime \
 	rusers \
@@ -132,7 +133,6 @@ SUBDIR=	alias \
 	sdiff \
 	sed \
 	seq \
-	shar \
 	showmount \
 	sockstat \
 	soelim \
@@ -140,6 +140,7 @@ SUBDIR=	alias \
 	split \
 	stat \
 	stdbuf \
+	strings \
 	su \
 	systat \
 	tail \
@@ -153,6 +154,7 @@ SUBDIR=	alias \
 	tr \
 	true \
 	truncate \
+	ts \
 	tsort \
 	tty \
 	uname \
@@ -216,7 +218,9 @@ SUBDIR.${MK_ICONV}+=	mkesdb
 SUBDIR.${MK_ISCSI}+=	iscsictl
 SUBDIR.${MK_KDUMP}+=	kdump
 SUBDIR.${MK_KDUMP}+=	truss
+.if ${MK_MITKRB5} == "no"
 SUBDIR.${MK_KERBEROS_SUPPORT}+=	compile_et
+.endif
 SUBDIR.${MK_LDNS_UTILS}+=	drill
 SUBDIR.${MK_LDNS_UTILS}+=	host
 SUBDIR.${MK_LIB32}+=	ldd32
@@ -247,10 +251,8 @@ SUBDIR.${MK_TFTP}+=	tftp
 SUBDIR.${MK_TOOLCHAIN}+=	addr2line
 SUBDIR.${MK_TOOLCHAIN}+=	ar
 SUBDIR.${MK_TOOLCHAIN}+=	nm
-SUBDIR.${MK_TOOLCHAIN}+=	objcopy
 SUBDIR.${MK_TOOLCHAIN}+=	readelf
 SUBDIR.${MK_TOOLCHAIN}+=	size
-SUBDIR+=			strings
 .endif
 SUBDIR.${MK_TOOLCHAIN}+=	c89
 SUBDIR.${MK_TOOLCHAIN}+=	c99
@@ -258,6 +260,8 @@ SUBDIR.${MK_TOOLCHAIN}+=	ctags
 .if ${MK_LLVM_CXXFILT} == "no"
 SUBDIR.${MK_TOOLCHAIN}+=	cxxfilt
 .endif
+# ELF Tool Chain elfcopy required for EFI objects (PR280771)
+SUBDIR.${MK_TOOLCHAIN}+=	elfcopy
 SUBDIR.${MK_TOOLCHAIN}+=	file2c
 SUBDIR.${MK_TOOLCHAIN}+=	gprof
 SUBDIR.${MK_TOOLCHAIN}+=	indent

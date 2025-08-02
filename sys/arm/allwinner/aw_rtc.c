@@ -252,16 +252,21 @@ aw_rtc_install_clocks(struct aw_rtc_softc *sc, device_t dev) {
 	phandle_t node;
 	int nclocks;
 
+	node = ofw_bus_get_node(dev);
+
+	/* Nothing to do. */
+	if (!OF_hasprop(node, "clocks"))
+		return;
+
 	/*
 	 * If the device tree gives us specific output names for the clocks,
 	 * use them.
 	 */
-	node = ofw_bus_get_node(dev);
 	nclocks = ofw_bus_string_list_to_array(node, "clock-output-names", &clknames);
 	if (nclocks > 0) {
 		if (nclocks != 3) {
 			device_printf(dev,
-			    "Found %d clocks instead of 3, aborting\n",
+			    "Found %d clocks names instead of 3, aborting\n",
 			    nclocks);
 			return;
 		}
